@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -5,6 +6,51 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::model::Sample;
+
+pub fn is_executable(p: &Path) -> bool {
+    p.is_file() && rustix::fs::access(p, rustix::fs::Access::EXEC_OK).is_ok()
+}
+
+pub fn resolve_agy_bin() -> Result<PathBuf> {
+    resolve_agy_bin_from(
+        std::env::var("AGY_BIN").ok().as_deref(),
+        std::env::var("PATH").ok().as_deref(),
+    )
+}
+
+pub fn resolve_agy_bin_from(agy_env: Option<&str>, path_env: Option<&str>) -> Result<PathBuf> {
+    if let Some(val) = agy_env.filter(|s| !s.is_empty()) {
+        let p = PathBuf::from(val);
+        if is_executable(&p) {
+            return Ok(p);
+        }
+        bail!(
+            "AGY_BIN is set to '{}', but it is not an executable file",
+            p.display()
+        );
+    }
+    if let Some(path_var) = path_env {
+        for dir in std::env::split_paths(path_var) {
+            if dir.as_os_str().is_empty() {
+                continue;
+            }
+            let candidate = dir.join("agy");
+            if is_executable(&candidate) {
+                return Ok(candidate);
+            }
+        }
+    }
+    bail!(
+        "could not find executable 'agy' on PATH or via $AGY_BIN. Please ensure agy is installed or set AGY_BIN"
+    );
+}
+
+pub fn agy_bin() -> String {
+    std::env::var("AGY_BIN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "agy".to_string())
+}
 
 pub fn parse_usage(json: &str, ts: DateTime<Utc>) -> Result<Vec<Sample>> {
     let root: Value = serde_json::from_str(json).context("invalid JSON")?;
@@ -141,13 +187,6 @@ pub fn fetch_with_timeout(agy_bin: &str, timeout: std::time::Duration) -> Result
     }
 
     Ok(stdout)
-}
-
-pub fn agy_bin() -> String {
-    std::env::var("AGY_BIN")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "agy".to_string())
 }
 
 #[cfg(test)]
@@ -350,5 +389,59 @@ mod tests {
             "grandchild held pipe open beyond deadline: {:?}",
             elapsed
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_agy_bin_fail_fast_on_invalid_agy_bin() {
+        let temp = tempfile::tempdir().unwrap();
+        let valid_bin = temp.path().join("agy");
+        std::fs::write(&valid_bin, "#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&valid_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let path_env = temp.path().to_str().unwrap();
+        let bad_agy = temp.path().join("nonexistent_agy");
+        let res = resolve_agy_bin_from(bad_agy.to_str(), Some(path_env));
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(
+            err.contains("AGY_BIN is set to"),
+            "expected fail-fast error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_agy_bin_skips_empty_path_elements() {
+        let temp = tempfile::tempdir().unwrap();
+        let pwd_bin = temp.path().join("agy");
+        std::fs::write(&pwd_bin, "#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&pwd_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Empty elements in PATH should be skipped, not resolving relative to PWD
+        let res = resolve_agy_bin_from(None, Some(":::/nonexistent_dir::"));
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("could not find executable 'agy' on PATH"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_agy_bin_preserves_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let real_bin = temp.path().join("real_agy");
+        std::fs::write(&real_bin, "#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&real_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let symlink_bin = temp.path().join("symlink_agy");
+        std::os::unix::fs::symlink(&real_bin, &symlink_bin).unwrap();
+
+        let res = resolve_agy_bin_from(symlink_bin.to_str(), None).unwrap();
+        assert_eq!(res, symlink_bin);
+        assert_ne!(res, real_bin);
     }
 }

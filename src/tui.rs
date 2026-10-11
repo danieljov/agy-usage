@@ -20,6 +20,7 @@ use crate::forecast::{BucketReport, Status};
 pub struct ViewState {
     pub focus: Option<usize>,
     pub message: Option<String>,
+    pub is_once: bool,
 }
 
 fn format_window(win: &str) -> std::borrow::Cow<'_, str> {
@@ -43,6 +44,22 @@ fn format_time_ago(dt: DateTime<Utc>, now: DateTime<Utc>) -> String {
         format!("{}h ago", diff / 3600)
     } else {
         format!("{}d ago", diff / 86400)
+    }
+}
+
+fn format_time_ago_compact(dt: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let diff = (now - dt).num_seconds();
+    if diff < 0 {
+        return "future".to_string();
+    }
+    if diff < 60 {
+        format!("{}s", diff)
+    } else if diff < 3600 {
+        format!("{}m", diff / 60)
+    } else if diff < 86400 {
+        format!("{}h", diff / 3600)
+    } else {
+        format!("{}d", diff / 86400)
     }
 }
 
@@ -71,8 +88,14 @@ pub fn draw(frame: &mut Frame, reports: &[BucketReport], state: &ViewState, now:
             ])
             .split(area);
 
-        draw_chart(frame, &reports[focus_idx], chunks[0]);
-        draw_table(frame, &reports[focus_idx..focus_idx + 1], chunks[1], now);
+        draw_chart(frame, &reports[focus_idx], chunks[0], Some(focus_idx));
+        draw_table(
+            frame,
+            &reports[focus_idx..focus_idx + 1],
+            chunks[1],
+            now,
+            Some(focus_idx),
+        );
         draw_status_bar(frame, reports, state, chunks[2], now);
         return;
     }
@@ -108,26 +131,36 @@ pub fn draw(frame: &mut Frame, reports: &[BucketReport], state: &ViewState, now:
         for (c_idx, c_chunk) in col_chunks.iter().enumerate() {
             let report_idx = r_idx * cols + c_idx;
             if report_idx < reports.len() {
-                draw_chart(frame, &reports[report_idx], *c_chunk);
+                draw_chart(frame, &reports[report_idx], *c_chunk, Some(report_idx));
             }
         }
     }
 
-    draw_table(frame, reports, chunks[1], now);
+    draw_table(frame, reports, chunks[1], now, None);
     draw_status_bar(frame, reports, state, chunks[2], now);
 }
 
-fn draw_chart(frame: &mut Frame, rep: &BucketReport, area: Rect) {
+fn draw_chart(frame: &mut Frame, rep: &BucketReport, area: Rect, index: Option<usize>) {
     if area.width < 4 || area.height < 3 {
         return;
     }
 
-    let title = format!(
-        "{} · {}  {:.0}% left",
-        rep.group,
-        format_window(&rep.window),
-        (rep.prognosis.remaining_now * 100.0).round()
-    );
+    let title = if let Some(idx) = index {
+        format!(
+            "[{}] {} · {}  {:.0}% left",
+            idx + 1,
+            rep.group,
+            format_window(&rep.window),
+            (rep.prognosis.remaining_now * 100.0).round()
+        )
+    } else {
+        format!(
+            "{} · {}  {:.0}% left",
+            rep.group,
+            format_window(&rep.window),
+            (rep.prognosis.remaining_now * 100.0).round()
+        )
+    };
 
     let actual_pts: Vec<(f64, f64)> = rep
         .current
@@ -247,7 +280,13 @@ fn draw_chart(frame: &mut Frame, rep: &BucketReport, area: Rect) {
     frame.render_widget(chart, area);
 }
 
-fn draw_table(frame: &mut Frame, reports: &[BucketReport], area: Rect, now: DateTime<Utc>) {
+fn draw_table(
+    frame: &mut Frame,
+    reports: &[BucketReport],
+    area: Rect,
+    now: DateTime<Utc>,
+    focus_idx: Option<usize>,
+) {
     if area.width < 4 || area.height < 2 {
         return;
     }
@@ -258,9 +297,9 @@ fn draw_table(frame: &mut Frame, reports: &[BucketReport], area: Rect, now: Date
         Cell::from("Left"),
         Cell::from("Rate/h"),
         Cell::from("Budget/h"),
-        Cell::from("At reset"),
+        Cell::from("Reset"),
         Cell::from("Status"),
-        Cell::from("Last sample"),
+        Cell::from("Sample"),
     ])
     .style(
         Style::default()
@@ -270,7 +309,9 @@ fn draw_table(frame: &mut Frame, reports: &[BucketReport], area: Rect, now: Date
 
     let rows: Vec<Row> = reports
         .iter()
-        .map(|rep| {
+        .enumerate()
+        .map(|(i, rep)| {
+            let idx = focus_idx.unwrap_or(i);
             let p = &rep.prognosis;
             let left_str = format!("{:.1}%", p.remaining_now * 100.0);
             let rate_str = p
@@ -286,10 +327,16 @@ fn draw_table(frame: &mut Frame, reports: &[BucketReport], area: Rect, now: Date
                 .map(|r| format!("{:.1}%", r * 100.0))
                 .unwrap_or_else(|| "—".into());
             let status_str = p.status.label();
-            let age_str = format_time_ago(p.last_sample, now);
+            let age_str = format_time_ago_compact(p.last_sample, now);
+
+            let group_cell = if idx < 9 {
+                format!("[{}] {}", idx + 1, rep.group)
+            } else {
+                rep.group.clone()
+            };
 
             Row::new(vec![
-                Cell::from(rep.group.clone()),
+                Cell::from(group_cell),
                 Cell::from(format_window(&rep.window)),
                 Cell::from(left_str),
                 Cell::from(rate_str),
@@ -302,14 +349,14 @@ fn draw_table(frame: &mut Frame, reports: &[BucketReport], area: Rect, now: Date
         .collect();
 
     let widths = [
-        Constraint::Percentage(22),
-        Constraint::Percentage(10),
-        Constraint::Percentage(9),
-        Constraint::Percentage(10),
-        Constraint::Percentage(11),
-        Constraint::Percentage(10),
-        Constraint::Percentage(14),
-        Constraint::Percentage(14),
+        Constraint::Min(18),
+        Constraint::Length(6),
+        Constraint::Length(6),
+        Constraint::Length(6),
+        Constraint::Length(8),
+        Constraint::Length(6),
+        Constraint::Length(15),
+        Constraint::Length(6),
     ];
 
     let table = Table::new(rows, widths)
@@ -330,7 +377,9 @@ fn draw_status_bar(
         return;
     }
 
-    let left_text = if let Some(msg) = &state.message {
+    let left_text = if state.is_once {
+        format!("agy-usage · {}", now.format("%Y-%m-%d %H:%M:%S UTC"))
+    } else if let Some(msg) = &state.message {
         format!("msg: {} | Esc: Grid  1-9: Focus  r: Refresh  q: Quit", msg)
     } else {
         "Esc: Grid  1-9: Focus  r: Refresh  q: Quit".to_string()
@@ -382,7 +431,10 @@ pub fn render_plain(
 ) -> String {
     let backend = ratatui::backend::TestBackend::new(width, height);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
-    let state = ViewState::default();
+    let state = ViewState {
+        is_once: true,
+        ..Default::default()
+    };
     terminal
         .draw(|f| draw(f, reports, &state, now))
         .expect("draw failed");
@@ -455,7 +507,10 @@ pub fn render_ansi(
 ) -> String {
     let backend = ratatui::backend::TestBackend::new(width, height);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
-    let state = ViewState::default();
+    let state = ViewState {
+        is_once: true,
+        ..Default::default()
+    };
     terminal
         .draw(|f| draw(f, reports, &state, now))
         .expect("draw failed");
@@ -524,6 +579,11 @@ pub fn print_once(reports: &[BucketReport], now: DateTime<Utc>) -> Result<()> {
     Ok(())
 }
 
+enum RefreshOutcome {
+    Success(String),
+    Error(String),
+}
+
 pub fn run(data_dir: &Path, tight: f64, agy_bin: &str) -> Result<()> {
     let mut terminal = ratatui::try_init()?;
     let result = (|| -> Result<()> {
@@ -532,7 +592,39 @@ pub fn run(data_dir: &Path, tight: f64, agy_bin: &str) -> Result<()> {
         let mut reports: Vec<BucketReport> = Vec::new();
         let mut state = ViewState::default();
 
+        let (refresh_tx, refresh_rx) = std::sync::mpsc::channel::<RefreshOutcome>();
+        let mut is_refreshing = false;
+        let mut refresh_handle: Option<std::thread::JoinHandle<()>> = None;
+
         loop {
+            while let Ok(outcome) = refresh_rx.try_recv() {
+                is_refreshing = false;
+                if let Some(h) = refresh_handle.take() {
+                    let _ = h.join();
+                }
+                match outcome {
+                    RefreshOutcome::Success(msg) => {
+                        state.message = Some(msg);
+                        if let Ok(loaded) = crate::store::load(&samples_path) {
+                            reports = crate::forecast::analyze(&loaded.samples, tight);
+                        }
+                        last_reload = Instant::now();
+                    }
+                    RefreshOutcome::Error(err) => {
+                        state.message = Some(err);
+                    }
+                }
+            }
+
+            if is_refreshing && refresh_handle.as_ref().is_some_and(|h| h.is_finished()) {
+                if let Some(h) = refresh_handle.take()
+                    && h.join().is_err()
+                {
+                    state.message = Some("Refresh worker panicked".to_string());
+                }
+                is_refreshing = false;
+            }
+
             let now_instant = Instant::now();
             if now_instant.duration_since(last_reload) >= StdDuration::from_secs(30) {
                 if let Ok(loaded) = crate::store::load(&samples_path) {
@@ -556,31 +648,63 @@ pub fn run(data_dir: &Path, tight: f64, agy_bin: &str) -> Result<()> {
                     KeyCode::Esc => {
                         state.focus = None;
                     }
-                    KeyCode::Char('r') => match crate::source::fetch(agy_bin) {
-                        Ok(json) => match crate::source::parse_usage(&json, Utc::now()) {
-                            Ok(samples) => {
-                                if samples.is_empty() {
-                                    state.message =
-                                        Some("No enabled quota buckets in agy output".to_string());
-                                } else if let Err(e) = crate::store::append(&samples_path, &samples)
-                                {
-                                    state.message = Some(format!("Error appending samples: {}", e));
-                                } else {
-                                    state.message = Some("Refreshed successfully".to_string());
-                                    if let Ok(loaded) = crate::store::load(&samples_path) {
-                                        reports = crate::forecast::analyze(&loaded.samples, tight);
-                                    }
-                                    last_reload = Instant::now();
-                                }
-                            }
-                            Err(e) => {
-                                state.message = format!("Error parsing: {}", e).into();
-                            }
-                        },
-                        Err(e) => {
-                            state.message = format!("Error fetching: {}", e).into();
+                    KeyCode::Char('r') => {
+                        if is_refreshing {
+                            state.message = Some("Refresh already in progress...".to_string());
+                        } else {
+                            is_refreshing = true;
+                            state.message = Some("Refreshing in background...".to_string());
+                            let tx = refresh_tx.clone();
+                            let agy = agy_bin.to_string();
+                            let sp = samples_path.clone();
+                            refresh_handle = Some(std::thread::spawn(move || {
+                                let outcome =
+                                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                        || match crate::source::fetch(&agy) {
+                                            Ok(json) => {
+                                                match crate::source::parse_usage(&json, Utc::now())
+                                                {
+                                                    Ok(samples) => {
+                                                        if samples.is_empty() {
+                                                            RefreshOutcome::Error(
+                                                            "No enabled quota buckets in agy output"
+                                                                .to_string(),
+                                                        )
+                                                        } else if let Err(e) =
+                                                            crate::store::append(&sp, &samples)
+                                                        {
+                                                            RefreshOutcome::Error(format!(
+                                                                "Error appending samples: {}",
+                                                                e
+                                                            ))
+                                                        } else {
+                                                            RefreshOutcome::Success(
+                                                                "Refreshed successfully"
+                                                                    .to_string(),
+                                                            )
+                                                        }
+                                                    }
+                                                    Err(e) => RefreshOutcome::Error(format!(
+                                                        "Error parsing: {}",
+                                                        e
+                                                    )),
+                                                }
+                                            }
+                                            Err(e) => RefreshOutcome::Error(format!(
+                                                "Error fetching: {}",
+                                                e
+                                            )),
+                                        },
+                                    )) {
+                                        Ok(res) => res,
+                                        Err(_) => RefreshOutcome::Error(
+                                            "Refresh worker panicked".to_string(),
+                                        ),
+                                    };
+                                let _ = tx.send(outcome);
+                            }));
                         }
-                    },
+                    }
                     KeyCode::Char(c) if ('1'..='9').contains(&c) => {
                         let idx = (c as usize) - ('1' as usize);
                         if idx < reports.len() {
@@ -626,11 +750,8 @@ mod tests {
 
         assert!(text.contains("Gemini Models · Weekly"));
         assert!(text.contains("Claude and GPT models · 5h"));
-        assert!(
-            text.contains("on track")
-                || text.contains("will run out")
-                || text.contains("collecting")
-        );
+        assert!(text.contains("will run out"));
+        assert!(text.contains("on track"));
     }
 
     #[test]
@@ -682,6 +803,7 @@ mod tests {
         let state = ViewState {
             focus: Some(1),
             message: None,
+            is_once: false,
         };
         terminal.draw(|f| draw(f, &reports, &state, now)).unwrap();
 
@@ -720,5 +842,85 @@ mod tests {
         assert_eq!(lines.len(), 41); // 40 lines + trailing newline
         assert!(text.contains("Gemini Models · Weekly"));
         assert!(text.contains('\x1b'));
+    }
+
+    #[test]
+    fn focus_badges_rendered_in_chart_and_table() {
+        let reports = make_test_reports();
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
+        let text = render_plain(&reports, now, 120, 40);
+
+        // Chart titles have [1], [2], [3], [4]
+        assert!(text.contains("[1] Gemini Models · Weekly"));
+        assert!(text.contains("[2] Gemini Models · 5h"));
+
+        // Table rows have [1] Gemini Models, [2] Gemini Models
+        let weekly_row = text
+            .lines()
+            .find(|l| l.contains("Weekly") && l.starts_with('│'))
+            .expect("table row with Weekly window not found");
+        assert!(
+            weekly_row.contains("[1] Gemini Models"),
+            "table row group name was truncated in 120x40: {}",
+            weekly_row
+        );
+        // In 120-column view, full long group name expands and is not truncated
+        assert!(
+            text.contains("[3] Claude and GPT models"),
+            "long group name truncated in 120x40: {}",
+            text
+        );
+
+        // Verify in 80x24 terminal that table row group name and status are not truncated
+        let text_80 = render_plain(&reports, now, 80, 24);
+        let table_row_80 = text_80
+            .lines()
+            .find(|l| l.contains("Weekly") && l.starts_with('│'))
+            .expect("table row with Weekly window not found in 80x24");
+        assert!(
+            table_row_80.contains("[1] Gemini Models"),
+            "table row group name was truncated in 80x24 terminal:\n{}",
+            table_row_80
+        );
+        assert!(
+            table_row_80.contains("will run out"),
+            "table row status was truncated in 80x24 terminal:\n{}",
+            table_row_80
+        );
+    }
+
+    #[test]
+    fn one_shot_footer_renders_timestamp_instead_of_interactive_hints() {
+        let reports = make_test_reports();
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
+        let text = render_plain(&reports, now, 120, 40);
+
+        assert!(text.contains("agy-usage · 2026-10-11 17:05:00 UTC"));
+        assert!(!text.contains("Esc: Grid  1-9: Focus  r: Refresh  q: Quit"));
+    }
+
+    #[test]
+    fn interactive_footer_renders_key_hints() {
+        let reports = make_test_reports();
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = ViewState {
+            focus: None,
+            message: None,
+            is_once: false,
+        };
+        terminal.draw(|f| draw(f, &reports, &state, now)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..40 {
+            for x in 0..120 {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+
+        assert!(text.contains("Esc: Grid  1-9: Focus  r: Refresh  q: Quit"));
     }
 }

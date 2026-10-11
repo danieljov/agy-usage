@@ -66,30 +66,6 @@ fn resolve_data_dir(data_dir: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-fn is_executable(p: &Path) -> bool {
-    p.is_file() && rustix::fs::access(p, rustix::fs::Access::EXEC_OK).is_ok()
-}
-
-fn resolve_agy_bin() -> Result<PathBuf> {
-    if let Some(val) = std::env::var("AGY_BIN").ok().filter(|s| !s.is_empty()) {
-        let p = PathBuf::from(val);
-        if is_executable(&p) {
-            return Ok(p.canonicalize().unwrap_or(p));
-        }
-    }
-    if let Ok(path_var) = std::env::var("PATH") {
-        for dir in std::env::split_paths(&path_var) {
-            let candidate = dir.join("agy");
-            if is_executable(&candidate) {
-                return Ok(candidate.canonicalize().unwrap_or(candidate));
-            }
-        }
-    }
-    bail!(
-        "could not find executable 'agy' on PATH or via $AGY_BIN. Please ensure agy is installed or set AGY_BIN"
-    );
-}
-
 fn write_html_atomic(path: &Path, content: &str) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
@@ -168,10 +144,17 @@ fn main() -> Result<()> {
             }
         }
         Commands::InstallTimer => {
-            let exe = std::env::current_exe()?.canonicalize()?;
-            let agy_bin = resolve_agy_bin()?;
-            agy_usage::timer::install(&exe, &agy_bin, &data_dir)?;
+            let exe = std::env::current_exe()?;
+            let agy_bin = agy_usage::source::resolve_agy_bin()?;
+            agy_usage::timer::install(
+                &exe,
+                &agy_bin,
+                &data_dir,
+                cli.tight_threshold,
+                cli.history_days,
+            )?;
             println!("installed and started agy-usage.timer");
+            println!("Hint: run 'loginctl enable-linger' to collect while logged out");
         }
         Commands::UninstallTimer => {
             agy_usage::timer::uninstall()?;

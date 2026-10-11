@@ -155,4 +155,46 @@ fn cli_validations() {
         .status()
         .expect("failed to run agy-usage");
     assert!(!status_nonexec.success());
+
+    // 5. Invalid AGY_BIN fails fast even if a valid executable 'agy' exists on PATH
+    let valid_path_dir = dir.path().join("valid_bin");
+    fs::create_dir_all(&valid_path_dir).unwrap();
+    let valid_agy = valid_path_dir.join("agy");
+    fs::write(&valid_agy, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&valid_agy, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output_failfast = Command::new(bin_path)
+        .env("AGY_BIN", &non_exec_file)
+        .env("PATH", &valid_path_dir)
+        .arg("install-timer")
+        .output()
+        .expect("failed to run agy-usage");
+    assert!(!output_failfast.status.success());
+    let stderr_failfast = String::from_utf8_lossy(&output_failfast.stderr);
+    assert!(
+        stderr_failfast.contains("AGY_BIN is set to"),
+        "expected fail-fast error, got: {}",
+        stderr_failfast
+    );
+
+    // 6. Empty PATH element does not pick up ./agy in working directory
+    let run_dir = tempdir().unwrap();
+    let local_agy = run_dir.path().join("agy");
+    fs::write(&local_agy, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&local_agy, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output_emptypath = Command::new(bin_path)
+        .current_dir(run_dir.path())
+        .env_remove("AGY_BIN")
+        .env("PATH", ":::/nonexistent::")
+        .arg("install-timer")
+        .output()
+        .expect("failed to run agy-usage");
+    assert!(!output_emptypath.status.success());
+    let stderr_emptypath = String::from_utf8_lossy(&output_emptypath.stderr);
+    assert!(
+        stderr_emptypath.contains("could not find executable 'agy' on PATH"),
+        "expected PATH not found error, got: {}",
+        stderr_emptypath
+    );
 }
