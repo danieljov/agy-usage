@@ -15,6 +15,7 @@ use ratatui::widgets::{
 };
 
 use crate::forecast::{BucketReport, Status};
+use crate::model::Sample;
 
 #[derive(Default, Debug, Clone)]
 pub struct ViewState {
@@ -611,6 +612,25 @@ impl Drop for ShutdownWorkerGuard {
     }
 }
 
+fn reload_incremental(
+    path: &Path,
+    cursor: &mut crate::store::Cursor,
+    acc: &mut Vec<Sample>,
+    tight: f64,
+) -> Option<Vec<BucketReport>> {
+    let inc = crate::store::load_from(path, *cursor).ok()?;
+    if inc.reset {
+        *acc = inc.loaded.samples;
+    } else if inc.loaded.samples.is_empty() {
+        *cursor = inc.cursor;
+        return None;
+    } else {
+        acc.extend(inc.loaded.samples);
+    }
+    *cursor = inc.cursor;
+    Some(crate::forecast::analyze(acc, tight))
+}
+
 pub fn run(data_dir: &Path, tight: f64, agy_bin: &str) -> Result<()> {
     let mut terminal = ratatui::try_init()?;
     let result = (|| -> Result<()> {
@@ -618,6 +638,8 @@ pub fn run(data_dir: &Path, tight: f64, agy_bin: &str) -> Result<()> {
         let mut last_reload = Instant::now() - StdDuration::from_secs(60);
         let mut reports: Vec<BucketReport> = Vec::new();
         let mut state = ViewState::default();
+        let mut cursor = crate::store::Cursor::default();
+        let mut accumulated_samples: Vec<Sample> = Vec::new();
 
         let (refresh_tx, refresh_rx) = std::sync::mpsc::channel::<RefreshOutcome>();
         let mut is_refreshing = false;
@@ -638,8 +660,13 @@ pub fn run(data_dir: &Path, tight: f64, agy_bin: &str) -> Result<()> {
                 match outcome {
                     RefreshOutcome::Success(msg) => {
                         state.message = Some(msg);
-                        if let Ok(loaded) = crate::store::load(&samples_path) {
-                            reports = crate::forecast::analyze(&loaded.samples, tight);
+                        if let Some(new_reports) = reload_incremental(
+                            &samples_path,
+                            &mut cursor,
+                            &mut accumulated_samples,
+                            tight,
+                        ) {
+                            reports = new_reports;
                         }
                         last_reload = Instant::now();
                     }
@@ -665,8 +692,10 @@ pub fn run(data_dir: &Path, tight: f64, agy_bin: &str) -> Result<()> {
 
             let now_instant = Instant::now();
             if now_instant.duration_since(last_reload) >= StdDuration::from_secs(30) {
-                if let Ok(loaded) = crate::store::load(&samples_path) {
-                    reports = crate::forecast::analyze(&loaded.samples, tight);
+                if let Some(new_reports) =
+                    reload_incremental(&samples_path, &mut cursor, &mut accumulated_samples, tight)
+                {
+                    reports = new_reports;
                 }
                 last_reload = now_instant;
             }
@@ -1027,5 +1056,61 @@ mod tests {
         // Child process should have been killed by SIGKILL
         let status = child.wait().unwrap();
         assert!(!status.success());
+    }
+
+    #[test]
+    fn test_reload_incremental_behaviour() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("samples.jsonl");
+
+        let mut cursor = crate::store::Cursor::default();
+        let mut acc = Vec::new();
+
+        // 1. Initial load from non-existent file
+        let reports = reload_incremental(&path, &mut cursor, &mut acc, 0.1);
+        assert!(reports.is_none());
+        assert!(acc.is_empty());
+
+        // 2. Append sample
+        let s1 = Sample {
+            ts: Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap(),
+            group: "Gemini".to_string(),
+            bucket_id: "b1".to_string(),
+            window: "5h".to_string(),
+            remaining: 0.9,
+            reset_time: Utc.with_ymd_and_hms(2026, 10, 11, 17, 0, 0).unwrap(),
+        };
+        crate::store::append(&path, std::slice::from_ref(&s1)).unwrap();
+
+        let reports = reload_incremental(&path, &mut cursor, &mut acc, 0.1);
+        assert!(reports.is_some());
+        assert_eq!(acc, vec![s1.clone()]);
+
+        // 3. No changes: returns None, keeps acc
+        let reports_none = reload_incremental(&path, &mut cursor, &mut acc, 0.1);
+        assert!(reports_none.is_none());
+        assert_eq!(acc, vec![s1.clone()]);
+
+        // 4. Append another sample
+        let s2 = Sample {
+            ts: Utc.with_ymd_and_hms(2026, 10, 11, 12, 5, 0).unwrap(),
+            group: "Gemini".to_string(),
+            bucket_id: "b1".to_string(),
+            window: "5h".to_string(),
+            remaining: 0.85,
+            reset_time: Utc.with_ymd_and_hms(2026, 10, 11, 17, 0, 0).unwrap(),
+        };
+        crate::store::append(&path, std::slice::from_ref(&s2)).unwrap();
+
+        let reports = reload_incremental(&path, &mut cursor, &mut acc, 0.1);
+        assert!(reports.is_some());
+        assert_eq!(acc, vec![s1.clone(), s2.clone()]);
+
+        // 5. Prune old sample
+        crate::store::prune(&path, Utc.with_ymd_and_hms(2026, 10, 11, 12, 1, 0).unwrap()).unwrap();
+
+        let reports = reload_incremental(&path, &mut cursor, &mut acc, 0.1);
+        assert!(reports.is_some());
+        assert_eq!(acc, vec![s2]);
     }
 }
