@@ -400,28 +400,29 @@ pub fn render_plain(
 }
 
 pub fn print_once(reports: &[BucketReport], now: DateTime<Utc>) -> Result<()> {
-    if std::io::stdout().is_terminal() {
-        let height = ratatui::crossterm::terminal::size()
-            .map(|(_, h)| h)
-            .unwrap_or(40);
+    let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((120, 40));
+    if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
         let h = height.clamp(5, 40);
         let options = ratatui::TerminalOptions {
             viewport: ratatui::Viewport::Inline(h),
         };
-        let mut terminal = ratatui::init_with_options(options);
-        let state = ViewState::default();
-        let res = terminal.draw(|f| draw(f, reports, &state, now));
-        ratatui::restore();
-        println!();
-        res?;
-    } else {
-        println!("{}", render_plain(reports, now, 120, 40));
+        if let Ok(mut terminal) = ratatui::try_init_with_options(options) {
+            let state = ViewState::default();
+            let res = terminal.draw(|f| draw(f, reports, &state, now));
+            ratatui::restore();
+            println!();
+            return res.map(|_| ()).map_err(Into::into);
+        }
     }
+    println!(
+        "{}",
+        render_plain(reports, now, width.max(80), height.clamp(5, 40))
+    );
     Ok(())
 }
 
 pub fn run(data_dir: &Path, tight: f64, agy_bin: &str) -> Result<()> {
-    let mut terminal = ratatui::init();
+    let mut terminal = ratatui::try_init()?;
     let result = (|| -> Result<()> {
         let samples_path = data_dir.join("samples.jsonl");
         let mut last_reload = Instant::now() - StdDuration::from_secs(60);
