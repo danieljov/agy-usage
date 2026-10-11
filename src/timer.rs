@@ -91,8 +91,15 @@ pub fn uninstall() -> Result<()> {
 
     let service_path = dir.join("agy-usage.service");
     let timer_path = dir.join("agy-usage.timer");
-    let _ = fs::remove_file(service_path);
-    let _ = fs::remove_file(timer_path);
+    let remove_if_exists = |p: &Path| -> Result<()> {
+        match fs::remove_file(p) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("failed to remove {}", p.display())),
+        }
+    };
+    remove_if_exists(&service_path)?;
+    remove_if_exists(&timer_path)?;
 
     let reload = Command::new("systemctl")
         .args(["--user", "daemon-reload"])

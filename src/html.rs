@@ -23,8 +23,8 @@ struct DashboardData<'a> {
     reports: Vec<CompactReport<'a>>,
 }
 
-pub fn render(reports: &[BucketReport], generated_at: DateTime<Utc>, history_days: i64) -> String {
-    let cutoff = generated_at - Duration::days(history_days);
+pub fn render(reports: &[BucketReport], generated_at: DateTime<Utc>, history_days: u32) -> String {
+    let cutoff = generated_at - Duration::days(i64::from(history_days));
     let compact_reports: Vec<CompactReport> = reports
         .iter()
         .map(|r| {
@@ -178,6 +178,15 @@ mod tests {
         assert!(output.contains(
             "No samples yet — run \"agy-usage install-timer\" or \"agy-usage collect\"."
         ));
+    }
+
+    #[test]
+    fn offline_chart_guard_present() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
+        let output = render(&[], now, 30);
+        assert!(output.contains("typeof Chart !== 'undefined'"));
+        assert!(output.contains("Charts unavailable offline (Chart.js CDN unreached)"));
+        assert!(output.contains("rep.reset_time"));
     }
 
     #[test]

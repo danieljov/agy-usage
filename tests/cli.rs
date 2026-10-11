@@ -109,3 +109,28 @@ fn cli_collect_scenarios() {
     assert!(!status_disabled.success());
     assert!(!data_path3.join("samples.jsonl").exists());
 }
+
+#[test]
+fn cli_validations() {
+    let bin_path = env!("CARGO_BIN_EXE_agy-usage");
+    let dir = tempdir().unwrap();
+
+    // 1. Negative history_days is rejected by clap (u32 parse failure)
+    let status_neg = Command::new(bin_path)
+        .arg("--history-days")
+        .arg("-5")
+        .arg("show")
+        .arg("--once")
+        .status()
+        .expect("failed to run agy-usage");
+    assert!(!status_neg.success());
+
+    // 2. Directory passed to AGY_BIN is rejected by resolve_agy_bin in install-timer
+    let status_dir = Command::new(bin_path)
+        .env("AGY_BIN", dir.path())
+        .env("PATH", "")
+        .arg("install-timer")
+        .status()
+        .expect("failed to run agy-usage");
+    assert!(!status_dir.success());
+}

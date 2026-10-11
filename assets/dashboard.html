@@ -186,14 +186,14 @@
         const boundaryPlugin = {
             id: 'boundaries',
             beforeDraw: (chart) => {
-                const boundaries = chart.config.options.plugins?.boundaries?.dates || [];
-                if (!boundaries.length) return;
+                const dates = chart.config.options.plugins?.boundaries?.dates || [];
+                if (!dates.length) return;
                 const { ctx, chartArea: { top, bottom, left, right }, scales: { x } } = chart;
                 ctx.save();
                 ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
                 ctx.lineWidth = 1;
                 ctx.setLineDash([3, 3]);
-                boundaries.forEach(b => {
+                dates.forEach(b => {
                     const xPos = x.getPixelForValue(new Date(b).getTime());
                     if (xPos >= left && xPos <= right) {
                         ctx.beginPath();
@@ -205,7 +205,9 @@
                 ctx.restore();
             }
         };
-        Chart.register(boundaryPlugin);
+        if (typeof Chart !== 'undefined') {
+            Chart.register(boundaryPlugin);
+        }
 
         window.addEventListener('DOMContentLoaded', () => {
             const emptyEl = document.getElementById('empty-state');
@@ -322,45 +324,60 @@
                     });
                 }
 
-                new Chart(canvas, {
-                    type: 'line',
-                    data: { datasets },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        interaction: { mode: 'index', intersect: false },
-                        scales: {
-                            x: {
-                                type: 'time',
-                                time: {
-                                    displayFormats: {
-                                        hour: 'HH:mm',
-                                        day: 'MMM d'
-                                    }
+                if (typeof Chart !== 'undefined') {
+                    new Chart(canvas, {
+                        type: 'line',
+                        data: { datasets },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            interaction: { mode: 'index', intersect: false },
+                            scales: {
+                                x: {
+                                    type: 'time',
+                                    time: {
+                                        displayFormats: {
+                                            hour: 'HH:mm',
+                                            day: 'MMM d'
+                                        }
+                                    },
+                                    grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                                    ticks: { color: '#94a3b8' }
                                 },
-                                grid: { color: 'rgba(255, 255, 255, 0.05)' },
-                                ticks: { color: '#94a3b8' }
+                                y: {
+                                    min: 0,
+                                    max: 100,
+                                    grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                                    ticks: {
+                                        color: '#94a3b8',
+                                        callback: v => v + '%'
+                                    }
+                                }
                             },
-                            y: {
-                                min: 0,
-                                max: 100,
-                                grid: { color: 'rgba(255, 255, 255, 0.05)' },
-                                ticks: {
-                                    color: '#94a3b8',
-                                    callback: v => v + '%'
+                            plugins: {
+                                legend: {
+                                    labels: { color: '#94a3b8', boxWidth: 12 }
+                                },
+                                boundaries: {
+                                    dates: Array.from(new Set([
+                                        ...(rep.boundaries || []),
+                                        ...(rep.reset_time ? [rep.reset_time] : [])
+                                    ]))
                                 }
                             }
-                        },
-                        plugins: {
-                            legend: {
-                                labels: { color: '#94a3b8', boxWidth: 12 }
-                            },
-                            boundaries: {
-                                dates: rep.boundaries || []
-                            }
                         }
-                    }
-                });
+                    });
+                } else {
+                    const box = card.querySelector('.chart-box');
+                    box.style.display = 'flex';
+                    box.style.alignItems = 'center';
+                    box.style.justifyContent = 'center';
+                    box.style.color = 'var(--text-dim)';
+                    box.style.fontSize = '0.875rem';
+                    box.style.border = '1px dashed var(--border)';
+                    box.style.borderRadius = '4px';
+                    box.textContent = 'Charts unavailable offline (Chart.js CDN unreached)';
+                }
             });
         });
     </script>

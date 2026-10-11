@@ -18,7 +18,7 @@ struct Cli {
     tight_threshold: f64,
 
     #[arg(long, global = true, default_value_t = 30)]
-    history_days: i64,
+    history_days: u32,
 
     #[command(subcommand)]
     command: Commands,
@@ -69,7 +69,7 @@ fn resolve_data_dir(data_dir: Option<PathBuf>) -> Result<PathBuf> {
 fn resolve_agy_bin() -> Result<PathBuf> {
     if let Some(val) = std::env::var("AGY_BIN").ok().filter(|s| !s.is_empty()) {
         let p = PathBuf::from(val);
-        if p.exists() {
+        if p.is_file() {
             return Ok(p.canonicalize().unwrap_or(p));
         }
     }
@@ -87,20 +87,22 @@ fn resolve_agy_bin() -> Result<PathBuf> {
 }
 
 fn write_html_atomic(path: &Path, content: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let temp_name = format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or("dashboard.html"),
-        std::process::id()
-    );
-    let temp_path = parent.join(temp_name);
-    std::fs::write(&temp_path, content)?;
-    std::fs::rename(&temp_path, path)?;
+    std::fs::create_dir_all(parent)?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("failed to create temporary file in {}", parent.display()))?;
+    use std::io::Write;
+    temp.write_all(content.as_bytes())
+        .with_context(|| "failed to write html content to temporary file")?;
+    temp.flush()
+        .with_context(|| "failed to flush temporary file")?;
+    temp.persist(path).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to persist temporary file to {}: {}",
+            path.display(),
+            e.error
+        )
+    })?;
     Ok(())
 }
 
