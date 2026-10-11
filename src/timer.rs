@@ -32,6 +32,7 @@ pub fn unit_files(
     data_dir: &Path,
     tight_threshold: f64,
     history_days: u32,
+    retention_days: u32,
 ) -> Result<(String, String)> {
     let enc_exe = encode_unit_path(exe, true)?;
     let enc_agy = encode_unit_path(agy_bin, false)?;
@@ -45,9 +46,9 @@ Description=Antigravity quota usage collector
 Type=oneshot
 TimeoutStartSec=30s
 Environment="AGY_BIN={}"
-ExecStart="{}" --data-dir "{}" --tight-threshold {} --history-days {} collect
+ExecStart="{}" --data-dir "{}" --tight-threshold {} --history-days {} --retention-days {} collect
 "#,
-        enc_agy, enc_exe, enc_data, tight_threshold, history_days
+        enc_agy, enc_exe, enc_data, tight_threshold, history_days, retention_days
     );
 
     let timer = r#"[Unit]
@@ -87,13 +88,20 @@ pub fn install(
     data_dir: &Path,
     tight_threshold: f64,
     history_days: u32,
+    retention_days: u32,
 ) -> Result<()> {
     let dir = systemd_user_dir()?;
     fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create systemd user dir {}", dir.display()))?;
 
-    let (service_content, timer_content) =
-        unit_files(exe, agy_bin, data_dir, tight_threshold, history_days)?;
+    let (service_content, timer_content) = unit_files(
+        exe,
+        agy_bin,
+        data_dir,
+        tight_threshold,
+        history_days,
+        retention_days,
+    )?;
     let service_path = dir.join("agy-usage.service");
     let timer_path = dir.join("agy-usage.timer");
 
@@ -160,12 +168,12 @@ mod tests {
         let agy = Path::new("/home/u/.local/bin/agy");
         let data = Path::new("/d");
 
-        let (service, timer) = unit_files(exe, agy, data, 0.10, 30).unwrap();
+        let (service, timer) = unit_files(exe, agy, data, 0.10, 30, 90).unwrap();
 
         assert!(service.contains("TimeoutStartSec=30s"));
         assert!(service.contains("Environment=\"AGY_BIN=/home/u/.local/bin/agy\""));
         assert!(service.contains(
-            "ExecStart=\"/x/agy-usage\" --data-dir \"/d\" --tight-threshold 0.1 --history-days 30 collect"
+            "ExecStart=\"/x/agy-usage\" --data-dir \"/d\" --tight-threshold 0.1 --history-days 30 --retention-days 90 collect"
         ));
         assert!(timer.contains("OnCalendar=*:0/5"));
         assert!(timer.contains("Persistent=true"));
@@ -179,11 +187,11 @@ mod tests {
         let agy = Path::new("/opt/%h/$USER/bin/agy");
         let data = Path::new("/var/data/$DIR/%n");
 
-        let (service, _timer) = unit_files(exe, agy, data, 0.15, 14).unwrap();
+        let (service, _timer) = unit_files(exe, agy, data, 0.15, 14, 90).unwrap();
 
         assert!(service.contains("Environment=\"AGY_BIN=/opt/%%h/$USER/bin/agy\""));
         assert!(service.contains(
-            "ExecStart=\"/bin/agy%%u$$test\\\"bar\" --data-dir \"/var/data/$$DIR/%%n\" --tight-threshold 0.15 --history-days 14 collect"
+            "ExecStart=\"/bin/agy%%u$$test\\\"bar\" --data-dir \"/var/data/$$DIR/%%n\" --tight-threshold 0.15 --history-days 14 --retention-days 90 collect"
         ));
     }
 
@@ -194,10 +202,10 @@ mod tests {
         let bad_newline = Path::new("/d\nattack");
         let bad_cr = Path::new("/d\rattack");
 
-        assert!(unit_files(exe, agy, bad_newline, 0.10, 30).is_err());
-        assert!(unit_files(exe, agy, bad_cr, 0.10, 30).is_err());
-        assert!(unit_files(bad_newline, agy, Path::new("/d"), 0.10, 30).is_err());
-        assert!(unit_files(exe, bad_cr, Path::new("/d"), 0.10, 30).is_err());
+        assert!(unit_files(exe, agy, bad_newline, 0.10, 30, 90).is_err());
+        assert!(unit_files(exe, agy, bad_cr, 0.10, 30, 90).is_err());
+        assert!(unit_files(bad_newline, agy, Path::new("/d"), 0.10, 30, 90).is_err());
+        assert!(unit_files(exe, bad_cr, Path::new("/d"), 0.10, 30, 90).is_err());
     }
 
     #[test]
@@ -206,10 +214,26 @@ mod tests {
         let agy = Path::new("agy");
         let data = Path::new("data_dir");
 
-        let (service, _timer) = unit_files(exe, agy, data, 0.10, 30).unwrap();
+        let (service, _timer) = unit_files(exe, agy, data, 0.10, 30, 90).unwrap();
         // std::path::absolute resolves to absolute paths
         assert!(!service.contains("ExecStart=\"agy-usage\""));
         assert!(!service.contains("--data-dir \"data_dir\""));
-        assert!(service.contains("--tight-threshold 0.1 --history-days 30 collect"));
+        assert!(
+            service.contains("--tight-threshold 0.1 --history-days 30 --retention-days 90 collect")
+        );
+    }
+
+    #[test]
+    fn unit_files_propagates_retention_days() {
+        let (service, _timer) = unit_files(
+            Path::new("/x/agy-usage"),
+            Path::new("/usr/bin/agy"),
+            Path::new("/d"),
+            0.10,
+            30,
+            120,
+        )
+        .unwrap();
+        assert!(service.contains("--history-days 30 --retention-days 120 collect"));
     }
 }

@@ -198,3 +198,115 @@ fn cli_validations() {
         stderr_emptypath
     );
 }
+
+fn run_html(data: &std::path::Path, extra: &[&str]) -> std::process::Output {
+    let out_file = data.join("out.html");
+    let mut args: Vec<String> = vec!["--data-dir".into(), data.display().to_string()];
+    args.extend(extra.iter().map(|s| s.to_string()));
+    args.extend([
+        "html".into(),
+        "--out".into(),
+        out_file.display().to_string(),
+    ]);
+    Command::new(env!("CARGO_BIN_EXE_agy-usage"))
+        .args(&args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn cli_rejects_retention_days_below_minimum() {
+    let dir = tempdir().unwrap();
+    let out = run_html(dir.path(), &["--retention-days", "7"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(stderr.contains("8..=36500"), "unexpected stderr: {stderr}");
+}
+
+#[test]
+fn cli_rejects_explicit_retention_less_than_history() {
+    let dir = tempdir().unwrap();
+    let out = run_html(
+        dir.path(),
+        &["--history-days", "60", "--retention-days", "30"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(
+        stderr.contains("cannot be less than --history-days"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn cli_accepts_explicit_retention_equal_to_history() {
+    let dir = tempdir().unwrap();
+    let out = run_html(
+        dir.path(),
+        &["--history-days", "30", "--retention-days", "30"],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Regression guard: units installed before Phase 3 pass --history-days without
+/// --retention-days. These must keep working even when history > 90.
+#[test]
+fn cli_accepts_large_history_without_retention_flag() {
+    let dir = tempdir().unwrap();
+    let out = run_html(dir.path(), &["--history-days", "120"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn cli_lazy_pruning_on_collect() {
+    let bin_path = env!("CARGO_BIN_EXE_agy-usage");
+    let script_dir = tempdir().unwrap();
+    let fake_agy_ok = script_dir.path().join("fake_agy_ok.sh");
+    let fixture_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/usage.json");
+    fs::write(
+        &fake_agy_ok,
+        format!("#!/bin/sh\ncat \"{}\"\n", fixture_path),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_agy_ok, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let data_dir = tempdir().unwrap();
+    let samples_file = data_dir.path().join("samples.jsonl");
+
+    // Seed with a sample 200 days old
+    let old_ts = chrono::Utc::now() - chrono::Duration::days(200);
+    let old_sample = agy_usage::model::Sample {
+        ts: old_ts,
+        group: "Old Group".to_string(),
+        bucket_id: "old_bucket".to_string(),
+        window: "5h".to_string(),
+        remaining: 0.5,
+        reset_time: old_ts + chrono::Duration::hours(5),
+    };
+    agy_usage::store::append(&samples_file, std::slice::from_ref(&old_sample)).unwrap();
+
+    // Run collect with --retention-days 90
+    let status = Command::new(bin_path)
+        .arg("--data-dir")
+        .arg(data_dir.path())
+        .arg("--retention-days")
+        .arg("90")
+        .arg("collect")
+        .arg("--no-html")
+        .env("AGY_BIN", &fake_agy_ok)
+        .status()
+        .expect("failed to run agy-usage collect");
+    assert!(status.success());
+
+    let loaded = agy_usage::store::load(&samples_file).unwrap();
+    assert_eq!(loaded.samples.len(), 4);
+    assert!(!loaded.samples.iter().any(|s| s.bucket_id == "old_bucket"));
+}

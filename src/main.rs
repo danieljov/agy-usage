@@ -20,6 +20,10 @@ struct Cli {
     #[arg(long, global = true, default_value_t = 30, value_parser = clap::value_parser!(u32).range(0..=36500))]
     history_days: u32,
 
+    /// Days of raw samples to keep on disk [default: max(90, --history-days)]
+    #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(8..=36500))]
+    retention_days: Option<u32>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -47,6 +51,16 @@ enum Commands {
     InstallTimer,
     /// Uninstall systemd user timer
     UninstallTimer,
+}
+
+fn effective_retention_days(explicit: Option<u32>, history_days: u32) -> Result<u32> {
+    match explicit {
+        Some(r) if r < history_days => {
+            bail!("--retention-days ({r}) cannot be less than --history-days ({history_days})")
+        }
+        Some(r) => Ok(r),
+        None => Ok(history_days.max(90)),
+    }
 }
 
 fn resolve_data_dir(data_dir: Option<PathBuf>) -> Result<PathBuf> {
@@ -88,6 +102,7 @@ fn write_html_atomic(path: &Path, content: &str) -> Result<()> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let retention_days = effective_retention_days(cli.retention_days, cli.history_days)?;
     let data_dir = resolve_data_dir(cli.data_dir)?;
 
     match cli.command {
@@ -103,6 +118,21 @@ fn main() -> Result<()> {
             let samples_path = data_dir.join("samples.jsonl");
             agy_usage::store::append(&samples_path, &samples)?;
             println!("collected {} buckets", samples.len());
+
+            let retention = chrono::Duration::days(i64::from(retention_days));
+            let prune_threshold = now - retention - chrono::Duration::days(1);
+            match agy_usage::store::oldest_timestamp(&samples_path) {
+                Ok(Some(oldest)) if oldest <= prune_threshold => {
+                    match agy_usage::store::prune(&samples_path, now - retention) {
+                        Ok(n) => eprintln!("pruned {n} samples older than {retention_days} days"),
+                        Err(e) => {
+                            eprintln!("warning: failed to prune {}: {e}", samples_path.display())
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("warning: failed to inspect {}: {e}", samples_path.display()),
+            }
 
             if !no_html {
                 let loaded = agy_usage::store::load(&samples_path)?;
@@ -152,6 +182,7 @@ fn main() -> Result<()> {
                 &data_dir,
                 cli.tight_threshold,
                 cli.history_days,
+                retention_days,
             )?;
             println!("installed and started agy-usage.timer");
             println!("Hint: run 'loginctl enable-linger' to collect while logged out");
@@ -163,4 +194,18 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_effective_retention_days() {
+        assert_eq!(effective_retention_days(None, 30).unwrap(), 90);
+        assert_eq!(effective_retention_days(None, 120).unwrap(), 120);
+        assert_eq!(effective_retention_days(Some(30), 30).unwrap(), 30);
+        assert_eq!(effective_retention_days(Some(120), 30).unwrap(), 120);
+        assert!(effective_retention_days(Some(30), 60).is_err());
+    }
 }
