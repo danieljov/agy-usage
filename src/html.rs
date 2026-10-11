@@ -247,6 +247,9 @@ mod tests {
         assert!(output.contains("pointHoverRadius: 4"));
         assert!(output.contains("emptyAt"));
         assert!(output.contains("❌ now"));
+        assert!(output.contains("updateRelativeTimes"));
+        assert!(output.contains("setInterval(updateRelativeTimes, 30000)"));
+        assert!(output.contains("statusLabel(p.status, p.empty_at, Date.now())"));
     }
 
     #[test]

@@ -287,8 +287,7 @@
                 const rateStr = p.rate_per_h != null ? `${(p.rate_per_h * 100).toFixed(2)}%/h` : '—';
                 const safeStr = p.safe_rate_per_h != null ? `${(p.safe_rate_per_h * 100).toFixed(2)}%/h` : '—';
                 const atResetStr = p.at_reset != null ? `${(p.at_reset * 100).toFixed(1)}%` : '—';
-                const baseTime = data && data.generated_at ? new Date(data.generated_at).getTime() : Date.now();
-                const statusStr = statusLabel(p.status, p.empty_at, baseTime);
+                const statusStr = statusLabel(p.status, p.empty_at, Date.now());
                 const lastDate = new Date(p.last_sample);
                 const lastSampleStr = `${lastDate.toLocaleTimeString(undefined, TIME_OPTS)} (${formatTimeAgo(lastDate)})`;
 
@@ -439,6 +438,28 @@
                     box.textContent = 'Charts unavailable offline (Chart.js CDN unreached)';
                 }
             });
+
+            function updateRelativeTimes() {
+                const now = Date.now();
+                if (metaEl && data && data.generated_at) {
+                    const gDate = new Date(data.generated_at);
+                    metaEl.textContent = `Generated: ${gDate.toLocaleString(undefined, TIME_OPTS)} (${formatTimeAgo(gDate)})`;
+                }
+                const rows = tbody.querySelectorAll('tr');
+                rows.forEach((tr, i) => {
+                    const rep = data.reports && data.reports[i];
+                    if (!rep) return;
+                    const p = rep.prognosis;
+                    if (tr.cells[5]) {
+                        tr.cells[5].textContent = statusLabel(p.status, p.empty_at, now);
+                    }
+                    if (tr.cells[6]) {
+                        const lDate = new Date(p.last_sample);
+                        tr.cells[6].textContent = `${lDate.toLocaleTimeString(undefined, TIME_OPTS)} (${formatTimeAgo(lDate)})`;
+                    }
+                });
+            }
+            setInterval(updateRelativeTimes, 30000);
         });
     </script>
 </body>
