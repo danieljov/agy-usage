@@ -22,11 +22,11 @@ pub struct ViewState {
     pub message: Option<String>,
 }
 
-fn format_window(win: &str) -> &'static str {
+fn format_window(win: &str) -> std::borrow::Cow<'_, str> {
     match win {
-        "weekly" => "Weekly",
-        "5h" => "5h",
-        _ => "Custom",
+        "weekly" => "Weekly".into(),
+        "5h" => "5h".into(),
+        other => other.into(),
     }
 }
 
@@ -410,9 +410,10 @@ pub fn print_once(reports: &[BucketReport], now: DateTime<Utc>) -> Result<()> {
         };
         let mut terminal = ratatui::init_with_options(options);
         let state = ViewState::default();
-        terminal.draw(|f| draw(f, reports, &state, now))?;
+        let res = terminal.draw(|f| draw(f, reports, &state, now));
         ratatui::restore();
         println!();
+        res?;
     } else {
         println!("{}", render_plain(reports, now, 120, 40));
     }
@@ -454,7 +455,11 @@ pub fn run(data_dir: &Path, tight: f64, agy_bin: &str) -> Result<()> {
                     KeyCode::Char('r') => match crate::source::fetch(agy_bin) {
                         Ok(json) => match crate::source::parse_usage(&json, Utc::now()) {
                             Ok(samples) => {
-                                if let Err(e) = crate::store::append(&samples_path, &samples) {
+                                if samples.is_empty() {
+                                    state.message =
+                                        Some("No enabled quota buckets in agy output".to_string());
+                                } else if let Err(e) = crate::store::append(&samples_path, &samples)
+                                {
                                     state.message = Some(format!("Error appending samples: {}", e));
                                 } else {
                                     state.message = Some("Refreshed successfully".to_string());

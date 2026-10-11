@@ -36,7 +36,10 @@ WantedBy=timers.target
 }
 
 pub fn systemd_user_dir() -> Result<PathBuf> {
-    if let Ok(config_home) = std::env::var("XDG_CONFIG_HOME") {
+    if let Some(config_home) = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
         Ok(PathBuf::from(config_home).join("systemd").join("user"))
     } else {
         let home = std::env::var("HOME").context("HOME not set")?;

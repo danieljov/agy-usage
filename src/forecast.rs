@@ -155,9 +155,10 @@ pub fn prognose(current: &[Sample], tight: f64) -> Prognosis {
 
     let empty_at = if rate > 0.0 {
         let hours_to_empty = r0 / rate;
-        let empty_time = t0 + Duration::milliseconds((hours_to_empty * 3_600_000.0).round() as i64);
-        if empty_time < end {
-            Some(empty_time)
+        if hours_to_empty < hours_left {
+            let ms = (hours_to_empty * 3_600_000.0).round() as i64;
+            t0.checked_add_signed(Duration::milliseconds(ms))
+                .filter(|&empty_time| empty_time < end)
         } else {
             None
         }
@@ -354,6 +355,15 @@ mod tests {
         let p_tight = prognose(&samples_tight, 0.10);
         assert!((p_tight.at_reset.unwrap() - 0.099).abs() < 1e-4);
         assert_eq!(p_tight.status, Status::Tight);
+    }
+
+    #[test]
+    fn near_zero_burn_rate_no_panic() {
+        // Very small drop: 0.50 -> 0.4999999999999999 over 60 min
+        let samples = vec![s(0, 0.50, None), s(60, 0.50 - 1e-15, None)];
+        let p = prognose(&samples, 0.10);
+        assert_eq!(p.empty_at, None);
+        assert_eq!(p.status, Status::OnTrack);
     }
 
     #[test]

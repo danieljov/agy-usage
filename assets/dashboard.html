@@ -156,6 +156,16 @@
             }
         }
 
+        function escapeHtml(s) {
+            if (!s) return '';
+            return String(s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
         function formatWindow(win) {
             if (!win) return '';
             if (win === 'weekly') return 'Weekly';
@@ -232,7 +242,7 @@
 
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
-                    <td><strong>${title}</strong></td>
+                    <td><strong>${escapeHtml(title)}</strong></td>
                     <td>${leftStr}</td>
                     <td>${rateStr}</td>
                     <td>${safeStr}</td>
@@ -246,7 +256,7 @@
                 card.className = 'chart-card';
                 card.innerHTML = `
                     <div class="chart-header">
-                        <div class="chart-title">${title}</div>
+                        <div class="chart-title">${escapeHtml(title)}</div>
                         <span class="badge">${leftStr} left</span>
                     </div>
                     <div class="chart-box">

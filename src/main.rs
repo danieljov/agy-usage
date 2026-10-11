@@ -52,7 +52,10 @@ enum Commands {
 fn resolve_data_dir(data_dir: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(dir) = data_dir {
         Ok(dir)
-    } else if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+    } else if let Some(xdg) = std::env::var("XDG_DATA_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
         Ok(PathBuf::from(xdg).join("agy-usage"))
     } else {
         let home = std::env::var("HOME").context("HOME environment variable not set")?;
@@ -64,7 +67,7 @@ fn resolve_data_dir(data_dir: Option<PathBuf>) -> Result<PathBuf> {
 }
 
 fn resolve_agy_bin() -> Result<PathBuf> {
-    if let Ok(val) = std::env::var("AGY_BIN") {
+    if let Some(val) = std::env::var("AGY_BIN").ok().filter(|s| !s.is_empty()) {
         let p = PathBuf::from(val);
         if p.exists() {
             return Ok(p.canonicalize().unwrap_or(p));

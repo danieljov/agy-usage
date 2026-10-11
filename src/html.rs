@@ -163,6 +163,14 @@ mod tests {
     }
 
     #[test]
+    fn escapes_dom_injection() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
+        let output = render(&[], now, 30);
+        assert!(output.contains("function escapeHtml("));
+        assert!(output.contains("escapeHtml(title)"));
+    }
+
+    #[test]
     fn empty_state() {
         let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
         let output = render(&[], now, 30);
