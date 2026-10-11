@@ -125,7 +125,17 @@ fn cli_validations() {
         .expect("failed to run agy-usage");
     assert!(!status_neg.success());
 
-    // 2. Directory passed to AGY_BIN is rejected by resolve_agy_bin in install-timer
+    // 2. Out-of-range history_days (4294967295) is rejected by clap range parser
+    let status_huge = Command::new(bin_path)
+        .arg("--history-days")
+        .arg("4294967295")
+        .arg("show")
+        .arg("--once")
+        .status()
+        .expect("failed to run agy-usage");
+    assert!(!status_huge.success());
+
+    // 3. Directory passed to AGY_BIN is rejected by resolve_agy_bin in install-timer
     let status_dir = Command::new(bin_path)
         .env("AGY_BIN", dir.path())
         .env("PATH", "")
@@ -133,4 +143,16 @@ fn cli_validations() {
         .status()
         .expect("failed to run agy-usage");
     assert!(!status_dir.success());
+
+    // 4. Non-executable regular file passed to AGY_BIN is rejected by resolve_agy_bin
+    let non_exec_file = dir.path().join("fake_agy_nonexec");
+    fs::write(&non_exec_file, "not executable").unwrap();
+    fs::set_permissions(&non_exec_file, fs::Permissions::from_mode(0o644)).unwrap();
+    let status_nonexec = Command::new(bin_path)
+        .env("AGY_BIN", &non_exec_file)
+        .env("PATH", "")
+        .arg("install-timer")
+        .status()
+        .expect("failed to run agy-usage");
+    assert!(!status_nonexec.success());
 }

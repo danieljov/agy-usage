@@ -24,7 +24,9 @@ struct DashboardData<'a> {
 }
 
 pub fn render(reports: &[BucketReport], generated_at: DateTime<Utc>, history_days: u32) -> String {
-    let cutoff = generated_at - Duration::days(i64::from(history_days));
+    let cutoff = Duration::try_days(i64::from(history_days))
+        .and_then(|d| generated_at.checked_sub_signed(d))
+        .unwrap_or(DateTime::<Utc>::MIN_UTC);
     let compact_reports: Vec<CompactReport> = reports
         .iter()
         .map(|r| {
@@ -141,6 +143,22 @@ mod tests {
         let val: serde_json::Value = serde_json::from_str(&extract_json(&output)).unwrap();
         let series = val["reports"][0]["series"].as_array().unwrap();
         assert_eq!(series.len(), 1);
+    }
+
+    #[test]
+    fn history_days_max_no_panic() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
+        let s = Sample {
+            ts: now,
+            group: "Gemini".to_string(),
+            bucket_id: "gemini-weekly".to_string(),
+            window: "weekly".to_string(),
+            remaining: 0.85,
+            reset_time: now + Duration::days(6),
+        };
+        let rep = make_report("Gemini", "gemini-weekly", "weekly", vec![s]);
+        let output = render(&[rep], now, u32::MAX);
+        assert!(output.contains("\"bucket_id\":\"gemini-weekly\""));
     }
 
     #[test]

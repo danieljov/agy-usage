@@ -17,7 +17,7 @@ struct Cli {
     #[arg(long, global = true, default_value_t = 0.10)]
     tight_threshold: f64,
 
-    #[arg(long, global = true, default_value_t = 30)]
+    #[arg(long, global = true, default_value_t = 30, value_parser = clap::value_parser!(u32).range(0..=36500))]
     history_days: u32,
 
     #[command(subcommand)]
@@ -66,23 +66,27 @@ fn resolve_data_dir(data_dir: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
+fn is_executable(p: &Path) -> bool {
+    p.is_file() && rustix::fs::access(p, rustix::fs::Access::EXEC_OK).is_ok()
+}
+
 fn resolve_agy_bin() -> Result<PathBuf> {
     if let Some(val) = std::env::var("AGY_BIN").ok().filter(|s| !s.is_empty()) {
         let p = PathBuf::from(val);
-        if p.is_file() {
+        if is_executable(&p) {
             return Ok(p.canonicalize().unwrap_or(p));
         }
     }
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path_var) {
             let candidate = dir.join("agy");
-            if candidate.is_file() {
+            if is_executable(&candidate) {
                 return Ok(candidate.canonicalize().unwrap_or(candidate));
             }
         }
     }
     bail!(
-        "could not find 'agy' on PATH or via $AGY_BIN. Please ensure agy is installed or set AGY_BIN"
+        "could not find executable 'agy' on PATH or via $AGY_BIN. Please ensure agy is installed or set AGY_BIN"
     );
 }
 
