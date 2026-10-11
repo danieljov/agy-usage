@@ -243,6 +243,23 @@ mod tests {
         assert!(output.contains("decimation:"));
         assert!(output.contains("algorithm: 'min-max'"));
         assert!(output.contains("toFixed(1)"));
+        assert!(output.contains("rep.series.length === 1 ? 2"));
+        assert!(output.contains("pointHoverRadius: 4"));
+        assert!(output.contains("emptyAt"));
+        assert!(output.contains("❌ now"));
+    }
+
+    #[test]
+    fn serializes_will_run_out_prognosis_with_empty_at() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
+        let empty = now + Duration::hours(3);
+        let mut rep = make_report("Gemini", "gemini-weekly", "weekly", vec![]);
+        rep.prognosis.status = Status::WillRunOut;
+        rep.prognosis.empty_at = Some(empty);
+        let output = render(&[rep], now, 30, ClockFormat::H24);
+
+        assert!(output.contains("\"status\":\"WillRunOut\""));
+        assert!(output.contains("\"empty_at\":\"2026-10-11T15:00:00Z\""));
     }
 
     #[test]

@@ -176,10 +176,29 @@
                 };
         }
 
-        function statusLabel(status) {
+        function statusLabel(status, emptyAt, now) {
+            if (status === 'WillRunOut') {
+                if (emptyAt) {
+                    const emptyDate = new Date(emptyAt);
+                    const nowDate = now ? new Date(now) : new Date();
+                    const sec = Math.floor((emptyDate.getTime() - nowDate.getTime()) / 1000);
+                    if (isNaN(sec)) return '❌ will run out';
+                    if (sec <= 0) return '❌ now';
+                    if (sec < 60) return '❌ in <1m';
+                    if (sec < 3600) return `❌ in ${Math.floor(sec / 60)}m`;
+                    if (sec < 86400) {
+                        const hr = Math.floor(sec / 3600);
+                        const min = Math.floor((sec % 3600) / 60);
+                        return min > 0 ? `❌ in ${hr}h ${min}m` : `❌ in ${hr}h`;
+                    }
+                    const d = Math.floor(sec / 86400);
+                    const hr = Math.floor((sec % 86400) / 3600);
+                    return hr > 0 ? `❌ in ${d}d ${hr}h` : `❌ in ${d}d`;
+                }
+                return '❌ will run out';
+            }
             switch (status) {
                 case 'Collecting': return '⏳ collecting';
-                case 'WillRunOut': return '❌ will run out';
                 case 'Tight': return '⚠️ tight';
                 case 'OnTrack': return '✅ on track';
                 default: return status || '—';
@@ -268,7 +287,8 @@
                 const rateStr = p.rate_per_h != null ? `${(p.rate_per_h * 100).toFixed(2)}%/h` : '—';
                 const safeStr = p.safe_rate_per_h != null ? `${(p.safe_rate_per_h * 100).toFixed(2)}%/h` : '—';
                 const atResetStr = p.at_reset != null ? `${(p.at_reset * 100).toFixed(1)}%` : '—';
-                const statusStr = statusLabel(p.status);
+                const baseTime = data && data.generated_at ? new Date(data.generated_at).getTime() : Date.now();
+                const statusStr = statusLabel(p.status, p.empty_at, baseTime);
                 const lastDate = new Date(p.last_sample);
                 const lastSampleStr = `${lastDate.toLocaleTimeString(undefined, TIME_OPTS)} (${formatTimeAgo(lastDate)})`;
 
@@ -302,13 +322,15 @@
 
                 // Actual series
                 if (rep.series && rep.series.length > 0) {
+                    const isWeekly = !!rep.window && rep.window.toLowerCase() === 'weekly';
                     datasets.push({
                         label: 'Actual',
                         data: rep.series.map(pt => ({ x: pt[0], y: pt[1] * 100 })),
                         borderColor: '#38bdf8',
                         backgroundColor: '#38bdf8',
                         borderWidth: 2,
-                        pointRadius: rep.series.length > 60 ? 0 : 2,
+                        pointRadius: rep.series.length === 1 ? 2 : ((isWeekly || rep.series.length > 60) ? 0 : 2),
+                        pointHoverRadius: 4,
                         tension: 0,
                     });
                 }

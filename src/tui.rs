@@ -329,7 +329,7 @@ fn draw_table(
                 .at_reset
                 .map(|r| format!("{:.1}%", r * 100.0))
                 .unwrap_or_else(|| "—".into());
-            let status_str = p.status.label();
+            let status_str = p.status_label(now);
             let age_str = format_time_ago_compact(p.last_sample, now);
 
             let group_cell = if idx < 9 {
@@ -429,6 +429,27 @@ fn draw_status_bar(
     frame.render_widget(Paragraph::new(line), area);
 }
 
+fn visible_cells(
+    buffer: &ratatui::buffer::Buffer,
+    y: u16,
+    width: u16,
+) -> impl Iterator<Item = &ratatui::buffer::Cell> {
+    let mut skip = 0;
+    (0..width).filter_map(move |x| {
+        if skip > 0 {
+            skip -= 1;
+            return None;
+        }
+        let cell = &buffer[(x, y)];
+        let sym = cell.symbol();
+        let w = unicode_width::UnicodeWidthStr::width(sym);
+        if w > 1 {
+            skip = w - 1;
+        }
+        Some(cell)
+    })
+}
+
 pub fn render_plain(
     reports: &[BucketReport],
     now: DateTime<Utc>,
@@ -450,8 +471,7 @@ pub fn render_plain(
     let mut lines = Vec::with_capacity(height as usize);
     for y in 0..height {
         let mut line = String::with_capacity(width as usize);
-        for x in 0..width {
-            let cell = &buffer[(x, y)];
+        for cell in visible_cells(buffer, y, width) {
             line.push_str(cell.symbol());
         }
         lines.push(line.trim_end().to_string());
@@ -533,8 +553,7 @@ pub fn render_ansi(
         let mut current_bold = false;
         let mut line_buf = String::new();
 
-        for x in 0..width {
-            let cell = &buffer[(x, y)];
+        for cell in visible_cells(buffer, y, width) {
             let is_bold = cell.modifier.contains(Modifier::BOLD);
 
             if is_bold != current_bold {
@@ -837,7 +856,7 @@ mod tests {
 
         assert!(text.contains("Gemini Models · Weekly"));
         assert!(text.contains("Claude and GPT models · 5h"));
-        assert!(text.contains("will run out"));
+        assert!(text.contains("in 1d 13h"));
         assert!(text.contains("on track"));
     }
 
@@ -971,10 +990,65 @@ mod tests {
             table_row_80
         );
         assert!(
-            table_row_80.contains("will run out"),
+            table_row_80.contains("in 1d 13h"),
             "table row status was truncated in 80x24 terminal:\n{}",
             table_row_80
         );
+
+        // Verify right border alignment and exact width in 80x24 plain text
+        use unicode_width::UnicodeWidthStr;
+        for line in text_80.lines() {
+            if line.starts_with('│') || line.starts_with('┌') || line.starts_with('└') {
+                assert_eq!(
+                    line.width(),
+                    80,
+                    "line display width must be exactly 80:\n{}",
+                    line
+                );
+                assert!(
+                    line.ends_with('│') || line.ends_with('┐') || line.ends_with('┘'),
+                    "line must end with box border character:\n{}",
+                    line
+                );
+            }
+        }
+
+        // Verify right border alignment and exact width in 80x24 ANSI text
+        let ansi_80 = render_ansi(&reports, now, 80, 24, ClockFormat::H24);
+        for line in ansi_80.lines() {
+            let stripped = strip_ansi(line);
+            if stripped.starts_with('│') || stripped.starts_with('┌') || stripped.starts_with('└')
+            {
+                assert_eq!(
+                    stripped.width(),
+                    80,
+                    "stripped ANSI line display width must be exactly 80:\n{}",
+                    stripped
+                );
+                assert!(
+                    stripped.ends_with('│') || stripped.ends_with('┐') || stripped.ends_with('┘'),
+                    "stripped ANSI line must end with box border character:\n{}",
+                    stripped
+                );
+            }
+        }
+    }
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::new();
+        let mut in_escape = false;
+        for c in s.chars() {
+            if c == '\x1b' {
+                in_escape = true;
+            } else if in_escape {
+                if c.is_ascii_alphabetic() {
+                    in_escape = false;
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
     }
 
     #[test]

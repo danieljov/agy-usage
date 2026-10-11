@@ -20,6 +20,42 @@ impl Status {
             Status::OnTrack => "✅ on track",
         }
     }
+
+    pub fn label_with_time(&self, empty_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+        match self {
+            Status::WillRunOut => {
+                if let Some(t) = empty_at {
+                    let diff = (t - now).num_seconds();
+                    if diff <= 0 {
+                        "❌ now".to_string()
+                    } else if diff < 60 {
+                        "❌ in <1m".to_string()
+                    } else if diff < 3600 {
+                        format!("❌ in {}m", diff / 60)
+                    } else if diff < 86400 {
+                        let h = diff / 3600;
+                        let m = (diff % 3600) / 60;
+                        if m > 0 {
+                            format!("❌ in {}h {}m", h, m)
+                        } else {
+                            format!("❌ in {}h", h)
+                        }
+                    } else {
+                        let d = diff / 86400;
+                        let h = (diff % 86400) / 3600;
+                        if h > 0 {
+                            format!("❌ in {}d {}h", d, h)
+                        } else {
+                            format!("❌ in {}d", d)
+                        }
+                    }
+                } else {
+                    self.label().to_string()
+                }
+            }
+            s => s.label().to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -33,6 +69,12 @@ pub struct Prognosis {
     pub at_reset: Option<f64>,
     pub empty_at: Option<DateTime<Utc>>,
     pub status: Status,
+}
+
+impl Prognosis {
+    pub fn status_label(&self, now: DateTime<Utc>) -> String {
+        self.status.label_with_time(self.empty_at, now)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -618,5 +660,81 @@ mod tests {
         let p = prognose(&samples, 0.10);
         assert_eq!(p.status, Status::WillRunOut);
         assert_eq!(p.empty_at, Some(samples.last().unwrap().ts));
+    }
+
+    #[test]
+    fn status_label_formatting() {
+        let now = Utc::now();
+
+        // OnTrack, Tight, Collecting
+        assert_eq!(Status::OnTrack.label_with_time(None, now), "✅ on track");
+        assert_eq!(Status::Tight.label_with_time(None, now), "⚠️ tight");
+        assert_eq!(
+            Status::Collecting.label_with_time(None, now),
+            "⏳ collecting"
+        );
+
+        // WillRunOut with no empty_at
+        assert_eq!(
+            Status::WillRunOut.label_with_time(None, now),
+            "❌ will run out"
+        );
+
+        // WillRunOut in the past or now
+        assert_eq!(Status::WillRunOut.label_with_time(Some(now), now), "❌ now");
+        assert_eq!(
+            Status::WillRunOut.label_with_time(Some(now - Duration::seconds(10)), now),
+            "❌ now"
+        );
+
+        // WillRunOut < 60s
+        assert_eq!(
+            Status::WillRunOut.label_with_time(Some(now + Duration::seconds(45)), now),
+            "❌ in <1m"
+        );
+
+        // WillRunOut minutes
+        assert_eq!(
+            Status::WillRunOut.label_with_time(Some(now + Duration::minutes(15)), now),
+            "❌ in 15m"
+        );
+
+        // WillRunOut hours and minutes
+        assert_eq!(
+            Status::WillRunOut.label_with_time(Some(now + Duration::minutes(135)), now),
+            "❌ in 2h 15m"
+        );
+
+        // WillRunOut exact hours
+        assert_eq!(
+            Status::WillRunOut.label_with_time(Some(now + Duration::hours(3)), now),
+            "❌ in 3h"
+        );
+
+        // WillRunOut days and hours
+        assert_eq!(
+            Status::WillRunOut.label_with_time(Some(now + Duration::hours(27)), now),
+            "❌ in 1d 3h"
+        );
+
+        // WillRunOut exact days
+        assert_eq!(
+            Status::WillRunOut.label_with_time(Some(now + Duration::days(2)), now),
+            "❌ in 2d"
+        );
+
+        // Via Prognosis::status_label
+        let p = Prognosis {
+            remaining_now: 0.5,
+            reset_time: now + Duration::hours(10),
+            last_sample: now,
+            budget_now: None,
+            rate_per_h: None,
+            safe_rate_per_h: None,
+            at_reset: None,
+            empty_at: Some(now + Duration::minutes(45)),
+            status: Status::WillRunOut,
+        };
+        assert_eq!(p.status_label(now), "❌ in 45m");
     }
 }
