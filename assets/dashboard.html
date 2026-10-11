@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>agy-usage dashboard</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --surface: #1e293b;
+            --border: #334155;
+            --text: #f8fafc;
+            --text-dim: #94a3b8;
+            --accent: #38bdf8;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --success: #10b981;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            padding: 1.5rem;
+            line-height: 1.5;
+        }
+        header {
+            margin-bottom: 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 1rem;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 1rem;
+        }
+        h1 { font-size: 1.5rem; font-weight: 600; color: var(--text); }
+        .meta { color: var(--text-dim); font-size: 0.875rem; }
+        #empty-state {
+            background: var(--surface);
+            border: 1px dashed var(--border);
+            border-radius: 8px;
+            padding: 3rem;
+            text-align: center;
+            color: var(--text-dim);
+            font-size: 1.125rem;
+            margin: 2rem 0;
+        }
+        .table-container {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow-x: auto;
+            margin-bottom: 2rem;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.875rem;
+            text-align: left;
+        }
+        th, td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+        th {
+            background: rgba(255, 255, 255, 0.03);
+            color: var(--text-dim);
+            font-weight: 600;
+        }
+        tr:last-child td { border-bottom: none; }
+        .charts-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 1.5rem;
+        }
+        @media (min-width: 900px) {
+            .charts-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+        .chart-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem 1.25rem;
+        }
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+        .chart-title {
+            font-size: 1rem;
+            font-weight: 600;
+        }
+        .badge {
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            background: rgba(56, 189, 248, 0.15);
+            color: var(--accent);
+        }
+        .chart-box {
+            position: relative;
+            height: 260px;
+            width: 100%;
+        }
+    </style>
+    <script>/*__CHART_JS__*/</script>
+    <script>/*__DATE_FNS_ADAPTER__*/</script>
+</head>
+<body>
+    <header>
+        <h1>agy-usage dashboard</h1>
+        <div id="gen-meta" class="meta"></div>
+    </header>
+
+    <div id="empty-state" style="display: none;">
+        No samples yet — run "agy-usage install-timer" or "agy-usage collect".
+    </div>
+
+    <div id="content" style="display: none;">
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Bucket</th>
+                        <th>Left</th>
+                        <th>Rate/h</th>
+                        <th>Budget/h(safe)</th>
+                        <th>At reset</th>
+                        <th>Status</th>
+                        <th>Last sample</th>
+                    </tr>
+                </thead>
+                <tbody id="prognosis-rows"></tbody>
+            </table>
+        </div>
+
+        <div class="charts-grid" id="charts-grid"></div>
+    </div>
+
+    <script>
+        const data = /*__AGY_DATA__*/null;
+
+        // Clock format detected from the user's system when the dashboard was
+        // generated ("12h" | "24h"). Browsers otherwise follow their UI
+        // language (e.g. en-US => AM/PM) and date-fns defaults to 12h.
+        const USE_12H = !!data && data.clock === '12h';
+        const TIME_OPTS = { hourCycle: USE_12H ? 'h12' : 'h23' };
+
+        function chartTimeOptions() {
+            return USE_12H
+                ? {
+                    displayFormats: {
+                        millisecond: 'h:mm:ss.SSS a',
+                        second: 'h:mm:ss a',
+                        minute: 'h:mm a',
+                        hour: 'h a',
+                        day: 'MMM d'
+                    },
+                    tooltipFormat: 'MMM d, yyyy, h:mm:ss a'
+                }
+                : {
+                    displayFormats: {
+                        millisecond: 'HH:mm:ss.SSS',
+                        second: 'HH:mm:ss',
+                        minute: 'HH:mm',
+                        hour: 'HH:mm',
+                        day: 'MMM d'
+                    },
+                    tooltipFormat: 'MMM d, yyyy, HH:mm:ss'
+                };
+        }
+
+        function statusLabel(status, emptyAt, now) {
+            if (status === 'WillRunOut') {
+                if (emptyAt) {
+                    const emptyDate = new Date(emptyAt);
+                    const nowDate = now ? new Date(now) : new Date();
+                    const sec = Math.floor((emptyDate.getTime() - nowDate.getTime()) / 1000);
+                    if (isNaN(sec)) return '❌ will run out';
+                    if (sec <= 0) return '❌ now';
+                    if (sec < 60) return '❌ in <1m';
+                    if (sec < 3600) return `❌ in ${Math.floor(sec / 60)}m`;
+                    if (sec < 86400) {
+                        const hr = Math.floor(sec / 3600);
+                        const min = Math.floor((sec % 3600) / 60);
+                        return min > 0 ? `❌ in ${hr}h ${min}m` : `❌ in ${hr}h`;
+                    }
+                    const d = Math.floor(sec / 86400);
+                    const hr = Math.floor((sec % 86400) / 3600);
+                    return hr > 0 ? `❌ in ${d}d ${hr}h` : `❌ in ${d}d`;
+                }
+                return '❌ will run out';
+            }
+            switch (status) {
+                case 'Collecting': return '⏳ collecting';
+                case 'Tight': return '⚠️ tight';
+                case 'OnTrack': return '✅ on track';
+                default: return status || '—';
+            }
+        }
+
+        function escapeHtml(s) {
+            if (!s) return '';
+            return String(s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function formatWindow(win) {
+            if (!win) return '';
+            if (win === 'weekly') return 'Weekly';
+            if (win === '5h') return '5h';
+            return win.charAt(0).toUpperCase() + win.slice(1);
+        }
+
+        function formatTimeAgo(date) {
+            const sec = Math.floor((Date.now() - date.getTime()) / 1000);
+            if (sec < 60) return `${sec}s ago`;
+            const min = Math.floor(sec / 60);
+            if (min < 60) return `${min}m ago`;
+            const hr = Math.floor(min / 60);
+            if (hr < 24) return `${hr}h ago`;
+            return `${Math.floor(hr / 24)}d ago`;
+        }
+
+        const boundaryPlugin = {
+            id: 'boundaries',
+            beforeDraw: (chart) => {
+                const dates = chart.config.options.plugins?.boundaries?.dates || [];
+                if (!dates.length) return;
+                const { ctx, chartArea: { top, bottom, left, right }, scales: { x } } = chart;
+                ctx.save();
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([3, 3]);
+                dates.forEach(b => {
+                    const xPos = x.getPixelForValue(new Date(b).getTime());
+                    if (xPos >= left && xPos <= right) {
+                        ctx.beginPath();
+                        ctx.moveTo(xPos, top);
+                        ctx.lineTo(xPos, bottom);
+                        ctx.stroke();
+                    }
+                });
+                ctx.restore();
+            }
+        };
+        if (typeof Chart !== 'undefined') {
+            Chart.register(boundaryPlugin);
+        }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            const emptyEl = document.getElementById('empty-state');
+            const contentEl = document.getElementById('content');
+            const metaEl = document.getElementById('gen-meta');
+
+            if (!data || !data.reports || data.reports.length === 0) {
+                emptyEl.style.display = 'block';
+                contentEl.style.display = 'none';
+                return;
+            }
+
+            emptyEl.style.display = 'none';
+            contentEl.style.display = 'block';
+
+            const genDate = new Date(data.generated_at);
+            metaEl.textContent = `Generated: ${genDate.toLocaleString(undefined, TIME_OPTS)} (${formatTimeAgo(genDate)})`;
+
+            const tbody = document.getElementById('prognosis-rows');
+            const grid = document.getElementById('charts-grid');
+
+            data.reports.forEach((rep, idx) => {
+                const p = rep.prognosis;
+                const winFormatted = formatWindow(rep.window);
+                const title = `${rep.group} · ${winFormatted}`;
+
+                const leftStr = `${(p.remaining_now * 100).toFixed(1)}%`;
+                const rateStr = p.rate_per_h != null ? `${(p.rate_per_h * 100).toFixed(2)}%/h` : '—';
+                const safeStr = p.safe_rate_per_h != null ? `${(p.safe_rate_per_h * 100).toFixed(2)}%/h` : '—';
+                const atResetStr = p.at_reset != null ? `${(p.at_reset * 100).toFixed(1)}%` : '—';
+                const statusStr = statusLabel(p.status, p.empty_at, Date.now());
+                const lastDate = new Date(p.last_sample);
+                const lastSampleStr = `${lastDate.toLocaleTimeString(undefined, TIME_OPTS)} (${formatTimeAgo(lastDate)})`;
+
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td><strong>${escapeHtml(title)}</strong></td>
+                    <td>${leftStr}</td>
+                    <td>${rateStr}</td>
+                    <td>${safeStr}</td>
+                    <td>${atResetStr}</td>
+                    <td>${statusStr}</td>
+                    <td>${lastSampleStr}</td>
+                `;
+                tbody.appendChild(tr);
+
+                const card = document.createElement('div');
+                card.className = 'chart-card';
+                card.innerHTML = `
+                    <div class="chart-header">
+                        <div class="chart-title">${escapeHtml(title)}</div>
+                        <span class="badge">${leftStr} left</span>
+                    </div>
+                    <div class="chart-box">
+                        <canvas class="bucket-chart" data-idx="${idx}"></canvas>
+                    </div>
+                `;
+                grid.appendChild(card);
+
+                const canvas = card.querySelector('canvas');
+                const datasets = [];
+
+                // Actual series
+                if (rep.series && rep.series.length > 0) {
+                    const isWeekly = !!rep.window && rep.window.toLowerCase() === 'weekly';
+                    datasets.push({
+                        label: 'Actual',
+                        data: rep.series.map(pt => ({ x: pt[0], y: pt[1] * 100 })),
+                        borderColor: '#38bdf8',
+                        backgroundColor: '#38bdf8',
+                        borderWidth: 2,
+                        pointRadius: rep.series.length === 1 ? 2 : ((isWeekly || rep.series.length > 60) ? 0 : 2),
+                        pointHoverRadius: 4,
+                        tension: 0,
+                    });
+                }
+
+                // Budget line
+                if (rep.window_start && rep.reset_time) {
+                    datasets.push({
+                        label: 'Budget',
+                        data: [
+                            { x: new Date(rep.window_start).getTime(), y: 100 },
+                            { x: new Date(rep.reset_time).getTime(), y: 0 }
+                        ],
+                        borderColor: '#64748b',
+                        borderWidth: 1.5,
+                        borderDash: [4, 4],
+                        pointRadius: 0,
+                    });
+                }
+
+                // Projection
+                if (p.rate_per_h != null && p.rate_per_h > 0) {
+                    const startX = new Date(p.last_sample).getTime();
+                    const startY = p.remaining_now * 100;
+                    let endX, endY;
+                    if (p.empty_at) {
+                        endX = new Date(p.empty_at).getTime();
+                        endY = 0;
+                    } else {
+                        endX = new Date(p.reset_time).getTime();
+                        endY = (p.at_reset || 0) * 100;
+                    }
+                    const projColor = p.status === 'WillRunOut' ? '#ef4444' : (p.status === 'Tight' ? '#f59e0b' : '#10b981');
+                    datasets.push({
+                        label: 'Projection',
+                        data: [
+                            { x: startX, y: startY },
+                            { x: endX, y: endY }
+                        ],
+                        borderColor: projColor,
+                        borderWidth: 2,
+                        borderDash: [6, 4],
+                        pointRadius: 0,
+                    });
+                }
+
+                if (typeof Chart !== 'undefined') {
+                    new Chart(canvas, {
+                        type: 'line',
+                        data: { datasets },
+                        options: {
+                            parsing: false,
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            interaction: { mode: 'nearest', axis: 'x', intersect: false },
+                            scales: {
+                                x: {
+                                    type: 'time',
+                                    time: chartTimeOptions(),
+                                    grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                                    ticks: { color: '#94a3b8' }
+                                },
+                                y: {
+                                    min: 0,
+                                    max: 100,
+                                    grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                                    ticks: {
+                                        color: '#94a3b8',
+                                        callback: v => v + '%'
+                                    }
+                                }
+                            },
+                            plugins: {
+                                decimation: {
+                                    enabled: true,
+                                    algorithm: 'min-max',
+                                },
+                                tooltip: {
+                                    callbacks: {
+                                        label: (ctx) => {
+                                            const label = ctx.dataset.label ? `${ctx.dataset.label}: ` : '';
+                                            return ctx.parsed?.y != null ? `${label}${ctx.parsed.y.toFixed(1)}%` : label;
+                                        }
+                                    }
+                                },
+                                legend: {
+                                    labels: { color: '#94a3b8', boxWidth: 12 }
+                                },
+                                boundaries: {
+                                    dates: Array.from(new Set([
+                                        ...(rep.boundaries || []),
+                                        ...(rep.reset_time ? [rep.reset_time] : [])
+                                    ]))
+                                }
+                            }
+                        }
+                    });
+                } else {
+                    const box = card.querySelector('.chart-box');
+                    box.style.display = 'flex';
+                    box.style.alignItems = 'center';
+                    box.style.justifyContent = 'center';
+                    box.style.color = 'var(--text-dim)';
+                    box.style.fontSize = '0.875rem';
+                    box.style.border = '1px dashed var(--border)';
+                    box.style.borderRadius = '4px';
+                    box.textContent = 'Charts unavailable offline (Chart.js CDN unreached)';
+                }
+            });
+
+            function updateRelativeTimes() {
+                const now = Date.now();
+                if (metaEl && data && data.generated_at) {
+                    const gDate = new Date(data.generated_at);
+                    metaEl.textContent = `Generated: ${gDate.toLocaleString(undefined, TIME_OPTS)} (${formatTimeAgo(gDate)})`;
+                }
+                const rows = tbody.querySelectorAll('tr');
+                rows.forEach((tr, i) => {
+                    const rep = data.reports && data.reports[i];
+                    if (!rep) return;
+                    const p = rep.prognosis;
+                    if (tr.cells[5]) {
+                        tr.cells[5].textContent = statusLabel(p.status, p.empty_at, now);
+                    }
+                    if (tr.cells[6]) {
+                        const lDate = new Date(p.last_sample);
+                        tr.cells[6].textContent = `${lDate.toLocaleTimeString(undefined, TIME_OPTS)} (${formatTimeAgo(lDate)})`;
+                    }
+                });
+            }
+            setInterval(updateRelativeTimes, 30000);
+        });
+    </script>
+</body>
+</html>
