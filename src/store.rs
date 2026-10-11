@@ -37,7 +37,7 @@ impl Drop for LockGuard {
 }
 
 fn lock_sidecar(path: &Path, op: FlockOperation) -> std::io::Result<LockGuard> {
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
     let lock_path = path.with_extension("lock");
@@ -76,7 +76,7 @@ pub fn append(path: &Path, samples: &[Sample]) -> std::io::Result<()> {
     if samples.is_empty() {
         return Ok(());
     }
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
     let mut buffer = Vec::new();
@@ -147,7 +147,10 @@ pub fn prune(path: &Path, cutoff: DateTime<Utc>) -> std::io::Result<usize> {
     if !path.exists() {
         return Ok(0);
     }
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let _guard = lock_sidecar(path, FlockOperation::LockExclusive)?;
     if !path.exists() {
@@ -180,6 +183,8 @@ pub fn prune(path: &Path, cutoff: DateTime<Utc>) -> std::io::Result<usize> {
         }
         line_buf.clear();
     }
+
+    drop(reader);
 
     #[cfg(unix)]
     let _ = temp.as_file().set_permissions(permissions);

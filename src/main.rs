@@ -81,7 +81,10 @@ fn resolve_data_dir(data_dir: Option<PathBuf>) -> Result<PathBuf> {
 }
 
 fn write_html_atomic(path: &Path, content: &str) -> Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
     let mut temp = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("failed to create temporary file in {}", parent.display()))?;
