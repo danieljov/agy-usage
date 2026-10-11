@@ -214,6 +214,84 @@ fn run_html(data: &std::path::Path, extra: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
+fn html_clock(out: &std::process::Output, data: &std::path::Path) -> String {
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let html = std::fs::read_to_string(data.join("out.html")).unwrap();
+    let start = html.find("\"clock\":\"").expect("clock missing") + "\"clock\":\"".len();
+    html[start..start + 3].to_string()
+}
+
+#[test]
+fn cli_clock_flag_overrides_detection() {
+    let dir = tempdir().unwrap();
+    let out = run_html(dir.path(), &["--clock", "12h"]);
+    assert_eq!(html_clock(&out, dir.path()), "12h");
+    let out = run_html(dir.path(), &["--clock", "24h"]);
+    assert_eq!(html_clock(&out, dir.path()), "24h");
+}
+
+#[test]
+fn cli_clock_flag_rejects_unknown_value() {
+    let dir = tempdir().unwrap();
+    let out = run_html(dir.path(), &["--clock", "13h"]);
+    assert!(!out.status.success());
+}
+
+fn run_html_with_path(data: &std::path::Path, path_env: &std::path::Path) -> String {
+    let out_file = data.join("out.html");
+    let out = Command::new(env!("CARGO_BIN_EXE_agy-usage"))
+        .args(["--data-dir", &data.display().to_string()])
+        .args(["html", "--out", &out_file.display().to_string()])
+        .env("PATH", path_env)
+        .output()
+        .unwrap();
+    html_clock(&out, data)
+}
+
+/// Fake probe that only answers when invoked with exactly `expected_args`.
+fn fake_probe(dir: &std::path::Path, name: &str, expected_args: &str, output: &str) {
+    let p = dir.join(name);
+    let script = format!(
+        "#!/bin/sh\n[ \"$*\" = \"{expected_args}\" ] || exit 1\nprintf '%s\\n' \"{output}\"\n"
+    );
+    fs::write(&p, script).unwrap();
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn cli_clock_auto_falls_back_to_24h_without_probes() {
+    let dir = tempdir().unwrap();
+    // Neither gsettings nor locale can be found.
+    let empty_bin = tempdir().unwrap();
+    assert_eq!(run_html_with_path(dir.path(), empty_bin.path()), "24h");
+}
+
+#[test]
+fn cli_clock_auto_prefers_desktop_setting_over_locale() {
+    let dir = tempdir().unwrap();
+    let bin = tempdir().unwrap();
+    fake_probe(
+        bin.path(),
+        "gsettings",
+        "get org.gnome.desktop.interface clock-format",
+        "'12h'",
+    );
+    fake_probe(bin.path(), "locale", "t_fmt", "%T");
+    assert_eq!(run_html_with_path(dir.path(), bin.path()), "12h");
+}
+
+#[test]
+fn cli_clock_auto_uses_locale_without_desktop_setting() {
+    let dir = tempdir().unwrap();
+    let bin = tempdir().unwrap();
+    fake_probe(bin.path(), "locale", "t_fmt", "%r");
+    assert_eq!(run_html_with_path(dir.path(), bin.path()), "12h");
+}
+
 #[test]
 fn cli_rejects_retention_days_below_minimum() {
     let dir = tempdir().unwrap();

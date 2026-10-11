@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::{Duration as StdDuration, Instant};
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -14,6 +14,7 @@ use ratatui::widgets::{
     Axis, Block, Borders, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table,
 };
 
+use crate::clock::ClockFormat;
 use crate::forecast::{BucketReport, Status};
 use crate::model::Sample;
 
@@ -22,6 +23,7 @@ pub struct ViewState {
     pub focus: Option<usize>,
     pub message: Option<String>,
     pub is_once: bool,
+    pub clock: ClockFormat,
 }
 
 fn format_window(win: &str) -> std::borrow::Cow<'_, str> {
@@ -379,7 +381,10 @@ fn draw_status_bar(
     }
 
     let left_text = if state.is_once {
-        format!("agy-usage · {}", now.format("%Y-%m-%d %H:%M:%S UTC"))
+        format!(
+            "agy-usage · {}",
+            state.clock.format_datetime(&now.with_timezone(&Local))
+        )
     } else if let Some(msg) = &state.message {
         format!("msg: {} | Esc: Grid  1-9: Focus  r: Refresh  q: Quit", msg)
     } else {
@@ -429,11 +434,13 @@ pub fn render_plain(
     now: DateTime<Utc>,
     width: u16,
     height: u16,
+    clock: ClockFormat,
 ) -> String {
     let backend = ratatui::backend::TestBackend::new(width, height);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
     let state = ViewState {
         is_once: true,
+        clock,
         ..Default::default()
     };
     terminal
@@ -505,11 +512,13 @@ pub fn render_ansi(
     now: DateTime<Utc>,
     width: u16,
     height: u16,
+    clock: ClockFormat,
 ) -> String {
     let backend = ratatui::backend::TestBackend::new(width, height);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
     let state = ViewState {
         is_once: true,
+        clock,
         ..Default::default()
     };
     terminal
@@ -560,7 +569,7 @@ pub fn render_ansi(
     out
 }
 
-pub fn print_once(reports: &[BucketReport], now: DateTime<Utc>) -> Result<()> {
+pub fn print_once(reports: &[BucketReport], now: DateTime<Utc>, clock: ClockFormat) -> Result<()> {
     let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((120, 40));
     let needed = if reports.is_empty() {
         5
@@ -573,9 +582,9 @@ pub fn print_once(reports: &[BucketReport], now: DateTime<Utc>) -> Result<()> {
     let h = needed.min(height.saturating_sub(2)).clamp(10, 36);
 
     if std::io::stdout().is_terminal() {
-        print!("{}", render_ansi(reports, now, width.max(80), h));
+        print!("{}", render_ansi(reports, now, width.max(80), h, clock));
     } else {
-        println!("{}", render_plain(reports, now, 120, 40));
+        println!("{}", render_plain(reports, now, 120, 40, clock));
     }
     Ok(())
 }
@@ -637,6 +646,8 @@ pub fn run(data_dir: &Path, tight: f64, agy_bin: &str) -> Result<()> {
         let samples_path = data_dir.join("samples.jsonl");
         let mut last_reload = Instant::now() - StdDuration::from_secs(60);
         let mut reports: Vec<BucketReport> = Vec::new();
+        // The interactive view shows only relative times, so `state.clock` is
+        // unused here; plumb `--clock` through `run` before adding absolute ones.
         let mut state = ViewState::default();
         let mut cursor = crate::store::Cursor::default();
         let mut accumulated_samples: Vec<Sample> = Vec::new();
@@ -822,7 +833,7 @@ mod tests {
     fn renders_titles_and_table() {
         let reports = make_test_reports();
         let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
-        let text = render_plain(&reports, now, 120, 40);
+        let text = render_plain(&reports, now, 120, 40, ClockFormat::H24);
 
         assert!(text.contains("Gemini Models · Weekly"));
         assert!(text.contains("Claude and GPT models · 5h"));
@@ -854,7 +865,7 @@ mod tests {
         assert_eq!(reports.len(), 6);
 
         let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
-        let text = render_plain(&reports, now, 120, 40);
+        let text = render_plain(&reports, now, 120, 40, ClockFormat::H24);
         assert!(text.contains("Gemini Models · Weekly"));
         assert!(text.contains("Gemini Models · 5h"));
         assert!(text.contains("Claude and GPT models · Weekly"));
@@ -866,7 +877,7 @@ mod tests {
     #[test]
     fn empty_state() {
         let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
-        let text = render_plain(&[], now, 120, 40);
+        let text = render_plain(&[], now, 120, 40, ClockFormat::H24);
         assert!(text.contains("install-timer"));
     }
 
@@ -880,6 +891,7 @@ mod tests {
             focus: Some(1),
             message: None,
             is_once: false,
+            ..Default::default()
         };
         terminal.draw(|f| draw(f, &reports, &state, now)).unwrap();
 
@@ -902,7 +914,7 @@ mod tests {
     fn render_plain_text() {
         let reports = make_test_reports();
         let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
-        let text = render_plain(&reports, now, 120, 40);
+        let text = render_plain(&reports, now, 120, 40, ClockFormat::H24);
         let lines: Vec<&str> = text.split('\n').collect();
         assert_eq!(lines.len(), 40);
         assert!(text.contains("Gemini Models · Weekly"));
@@ -913,7 +925,7 @@ mod tests {
     fn render_ansi_text() {
         let reports = make_test_reports();
         let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
-        let text = render_ansi(&reports, now, 120, 40);
+        let text = render_ansi(&reports, now, 120, 40, ClockFormat::H24);
         let lines: Vec<&str> = text.split('\n').collect();
         assert_eq!(lines.len(), 41); // 40 lines + trailing newline
         assert!(text.contains("Gemini Models · Weekly"));
@@ -924,7 +936,7 @@ mod tests {
     fn focus_badges_rendered_in_chart_and_table() {
         let reports = make_test_reports();
         let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
-        let text = render_plain(&reports, now, 120, 40);
+        let text = render_plain(&reports, now, 120, 40, ClockFormat::H24);
 
         // Chart titles have [1], [2], [3], [4]
         assert!(text.contains("[1] Gemini Models · Weekly"));
@@ -948,7 +960,7 @@ mod tests {
         );
 
         // Verify in 80x24 terminal that table row group name and status are not truncated
-        let text_80 = render_plain(&reports, now, 80, 24);
+        let text_80 = render_plain(&reports, now, 80, 24, ClockFormat::H24);
         let table_row_80 = text_80
             .lines()
             .find(|l| l.contains("Weekly") && l.starts_with('│'))
@@ -969,10 +981,28 @@ mod tests {
     fn one_shot_footer_renders_timestamp_instead_of_interactive_hints() {
         let reports = make_test_reports();
         let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
-        let text = render_plain(&reports, now, 120, 40);
+        let text = render_plain(&reports, now, 120, 40, ClockFormat::H24);
 
-        assert!(text.contains("agy-usage · 2026-10-11 17:05:00 UTC"));
+        let local = now.with_timezone(&Local);
+        assert!(text.contains(&format!(
+            "agy-usage · {}",
+            local.format("%Y-%m-%d %H:%M:%S")
+        )));
+        assert!(!text.contains("UTC"));
         assert!(!text.contains("Esc: Grid  1-9: Focus  r: Refresh  q: Quit"));
+    }
+
+    #[test]
+    fn one_shot_footer_follows_12h_clock() {
+        let reports = make_test_reports();
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
+        let text = render_plain(&reports, now, 120, 40, ClockFormat::H12);
+
+        let local = now.with_timezone(&Local);
+        assert!(text.contains(&format!(
+            "agy-usage · {}",
+            local.format("%Y-%m-%d %I:%M:%S %p")
+        )));
     }
 
     #[test]
@@ -985,6 +1015,7 @@ mod tests {
             focus: None,
             message: None,
             is_once: false,
+            ..Default::default()
         };
         terminal.draw(|f| draw(f, &reports, &state, now)).unwrap();
 

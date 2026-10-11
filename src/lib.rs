@@ -1,3 +1,4 @@
+pub mod clock;
 pub mod forecast;
 pub mod html;
 pub mod model;

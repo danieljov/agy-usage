@@ -1,6 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 
+use crate::clock::ClockFormat;
 use crate::forecast::{BucketReport, Prognosis};
 
 const TEMPLATE: &str = include_str!("../assets/dashboard.html");
@@ -23,10 +24,16 @@ struct CompactReport<'a> {
 #[derive(Serialize)]
 struct DashboardData<'a> {
     generated_at: DateTime<Utc>,
+    clock: ClockFormat,
     reports: Vec<CompactReport<'a>>,
 }
 
-pub fn render(reports: &[BucketReport], generated_at: DateTime<Utc>, history_days: u32) -> String {
+pub fn render(
+    reports: &[BucketReport],
+    generated_at: DateTime<Utc>,
+    history_days: u32,
+    clock: ClockFormat,
+) -> String {
     let cutoff = Duration::try_days(i64::from(history_days))
         .and_then(|d| generated_at.checked_sub_signed(d))
         .unwrap_or(DateTime::<Utc>::MIN_UTC);
@@ -54,6 +61,7 @@ pub fn render(reports: &[BucketReport], generated_at: DateTime<Utc>, history_day
 
     let data = DashboardData {
         generated_at,
+        clock,
         reports: compact_reports,
     };
 
@@ -114,7 +122,7 @@ mod tests {
             reset_time: now + Duration::hours(5),
         };
         let rep = make_report("3p Models", "3p-5h", "5h", vec![s]);
-        let output = render(&[rep], now, 30);
+        let output = render(&[rep], now, 30, ClockFormat::H24);
         assert!(output.contains("\"bucket_id\":\"3p-5h\""));
         assert!(output.contains("\"series\":[["));
         assert!(!output.contains("/*__AGY_DATA__*/"));
@@ -145,7 +153,7 @@ mod tests {
             "weekly",
             vec![old_sample, recent_sample],
         );
-        let output = render(&[rep], now, 30);
+        let output = render(&[rep], now, 30, ClockFormat::H24);
         let val: serde_json::Value = serde_json::from_str(&extract_json(&output)).unwrap();
         let series = val["reports"][0]["series"].as_array().unwrap();
         assert_eq!(series.len(), 1);
@@ -163,7 +171,7 @@ mod tests {
             reset_time: now + Duration::days(6),
         };
         let rep = make_report("Gemini", "gemini-weekly", "weekly", vec![s]);
-        let output = render(&[rep], now, u32::MAX);
+        let output = render(&[rep], now, u32::MAX, ClockFormat::H24);
         assert!(output.contains("\"bucket_id\":\"gemini-weekly\""));
     }
 
@@ -179,17 +187,17 @@ mod tests {
             reset_time: now + Duration::hours(5),
         };
         let rep = make_report("x</script><b>", "b1", "5h", vec![s]);
-        let output = render(&[rep], now, 30);
+        let output = render(&[rep], now, 30, ClockFormat::H24);
         assert!(output.contains(r#"\u003c/script>"#));
         let count = output.matches("</script>").count();
-        let empty_output = render(&[], now, 30);
+        let empty_output = render(&[], now, 30, ClockFormat::H24);
         assert_eq!(count, empty_output.matches("</script>").count());
     }
 
     #[test]
     fn escapes_dom_injection() {
         let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
-        let output = render(&[], now, 30);
+        let output = render(&[], now, 30, ClockFormat::H24);
         assert!(output.contains("function escapeHtml("));
         assert!(output.contains("escapeHtml(title)"));
     }
@@ -197,7 +205,7 @@ mod tests {
     #[test]
     fn empty_state() {
         let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
-        let output = render(&[], now, 30);
+        let output = render(&[], now, 30, ClockFormat::H24);
         assert!(output.contains("\"reports\":[]"));
         assert!(output.contains(
             "No samples yet — run \"agy-usage install-timer\" or \"agy-usage collect\"."
@@ -207,7 +215,7 @@ mod tests {
     #[test]
     fn offline_chart_guard_present() {
         let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
-        let output = render(&[], now, 30);
+        let output = render(&[], now, 30, ClockFormat::H24);
         assert!(output.contains("typeof Chart !== 'undefined'"));
         assert!(output.contains("Charts unavailable offline (Chart.js CDN unreached)"));
         assert!(output.contains("rep.reset_time"));
@@ -219,7 +227,7 @@ mod tests {
         let ts = Utc.with_ymd_and_hms(2026, 10, 11, 17, 20, 0).unwrap();
         let samples = crate::source::parse_usage(fixture, ts).unwrap();
         let reports = crate::forecast::analyze(&samples, 0.10);
-        let html = render(&reports, ts, 30);
+        let html = render(&reports, ts, 30, ClockFormat::H24);
         std::fs::create_dir_all("target").unwrap();
         std::fs::write("target/demo.html", html).unwrap();
     }
@@ -227,7 +235,7 @@ mod tests {
     #[test]
     fn chartjs_tooltips_and_decimation_config() {
         let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
-        let output = render(&[], now, 30);
+        let output = render(&[], now, 30, ClockFormat::H24);
         assert!(output.contains("parsing: false"));
         assert!(output.contains("mode: 'nearest'"));
         assert!(output.contains("axis: 'x'"));
@@ -241,7 +249,7 @@ mod tests {
     fn renders_with_inlined_scripts_zero_external_cdns() {
         let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
         let rep = make_report("G", "b1", "weekly", vec![]);
-        let html = render(&[rep], now, 30);
+        let html = render(&[rep], now, 30, ClockFormat::H24);
 
         assert!(!html.contains("cdn.jsdelivr.net"));
         assert!(!html.contains("<script src="));
@@ -268,11 +276,52 @@ mod tests {
         };
         let rep = make_report("/*__CHART_JS__*/", "b1", "weekly", vec![s]);
         let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
-        let html = render(&[rep], now, 30);
+        let html = render(&[rep], now, 30, ClockFormat::H24);
 
         let first_idx = html.find(CHART_JS).expect("CHART_JS should be present");
         let second_idx = html[first_idx + CHART_JS.len()..].find(CHART_JS);
         assert!(second_idx.is_none(), "CHART_JS was expanded multiple times");
+    }
+
+    #[test]
+    fn embeds_detected_clock_format() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
+        let h12 = render(&[], now, 30, ClockFormat::H12);
+        let v12: serde_json::Value = serde_json::from_str(&extract_json(&h12)).unwrap();
+        assert_eq!(v12["clock"], "12h");
+        let h24 = render(&[], now, 30, ClockFormat::H24);
+        let v24: serde_json::Value = serde_json::from_str(&extract_json(&h24)).unwrap();
+        assert_eq!(v24["clock"], "24h");
+    }
+
+    #[test]
+    fn dashboard_time_displays_follow_clock_format() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
+        let html = render(&[], now, 30, ClockFormat::H24);
+        // Browser-locale formatting must be pinned to the detected hour cycle,
+        // otherwise e.g. an en-US browser shows AM/PM on a 24h system.
+        assert!(html.contains("hourCycle: USE_12H ? 'h12' : 'h23'"));
+        assert!(html.contains("genDate.toLocaleString(undefined, TIME_OPTS)"));
+        assert!(html.contains("lastDate.toLocaleTimeString(undefined, TIME_OPTS)"));
+        assert!(!TEMPLATE.contains("toLocaleString()"));
+        assert!(!TEMPLATE.contains("toLocaleTimeString()"));
+        // Chart axis + tooltip must override every date-fns time-of-day default
+        // (which are 12h "h:mm aaaa").
+        assert!(html.contains("time: chartTimeOptions()"));
+        for fmt in [
+            "millisecond: 'HH:mm:ss.SSS'",
+            "second: 'HH:mm:ss'",
+            "minute: 'HH:mm'",
+            "hour: 'HH:mm'",
+            "tooltipFormat: 'MMM d, yyyy, HH:mm:ss'",
+            "millisecond: 'h:mm:ss.SSS a'",
+            "second: 'h:mm:ss a'",
+            "minute: 'h:mm a'",
+            "hour: 'h a'",
+            "tooltipFormat: 'MMM d, yyyy, h:mm:ss a'",
+        ] {
+            assert!(TEMPLATE.contains(fmt), "missing chart time format {fmt}");
+        }
     }
 
     fn extract_json(html: &str) -> String {

@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use agy_usage::clock::ClockFormat;
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(
@@ -24,8 +25,38 @@ struct Cli {
     #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(8..=36500))]
     retention_days: Option<u32>,
 
+    /// Clock format for displayed times
+    ///
+    /// `auto` follows the GNOME clock setting, then the LC_TIME locale, then 24h.
+    #[arg(long, global = true, value_enum, default_value_t = ClockArg::Auto)]
+    clock: ClockArg,
+
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ClockArg {
+    Auto,
+    #[value(name = "12h")]
+    H12,
+    #[value(name = "24h")]
+    H24,
+}
+
+impl ClockArg {
+    /// The user's explicit override, or `None` for auto-detection.
+    fn explicit(self) -> Option<ClockFormat> {
+        match self {
+            ClockArg::Auto => None,
+            ClockArg::H12 => Some(ClockFormat::H12),
+            ClockArg::H24 => Some(ClockFormat::H24),
+        }
+    }
+
+    fn resolve(self) -> ClockFormat {
+        self.explicit().unwrap_or_else(ClockFormat::detect)
+    }
 }
 
 #[derive(Subcommand)]
@@ -143,7 +174,8 @@ fn main() -> Result<()> {
                     eprintln!("warning: skipped {} corrupt lines", loaded.skipped);
                 }
                 let reports = agy_usage::forecast::analyze(&loaded.samples, cli.tight_threshold);
-                let html_content = agy_usage::html::render(&reports, now, cli.history_days);
+                let html_content =
+                    agy_usage::html::render(&reports, now, cli.history_days, cli.clock.resolve());
                 write_html_atomic(&data_dir.join("dashboard.html"), &html_content)?;
             }
         }
@@ -155,7 +187,7 @@ fn main() -> Result<()> {
             }
             let reports = agy_usage::forecast::analyze(&loaded.samples, cli.tight_threshold);
             if once {
-                agy_usage::tui::print_once(&reports, Utc::now())?;
+                agy_usage::tui::print_once(&reports, Utc::now(), cli.clock.resolve())?;
             } else {
                 let agy_bin = agy_usage::source::agy_bin();
                 agy_usage::tui::run(&data_dir, cli.tight_threshold, &agy_bin)?;
@@ -168,7 +200,12 @@ fn main() -> Result<()> {
                 eprintln!("warning: skipped {} corrupt lines", loaded.skipped);
             }
             let reports = agy_usage::forecast::analyze(&loaded.samples, cli.tight_threshold);
-            let html_content = agy_usage::html::render(&reports, Utc::now(), cli.history_days);
+            let html_content = agy_usage::html::render(
+                &reports,
+                Utc::now(),
+                cli.history_days,
+                cli.clock.resolve(),
+            );
             let out_path = out.unwrap_or_else(|| data_dir.join("dashboard.html"));
             write_html_atomic(&out_path, &html_content)?;
             println!("wrote HTML dashboard to {}", out_path.display());
@@ -186,6 +223,7 @@ fn main() -> Result<()> {
                 cli.tight_threshold,
                 cli.history_days,
                 retention_days,
+                cli.clock.explicit(),
             )?;
             println!("installed and started agy-usage.timer");
             println!("Hint: run 'loginctl enable-linger' to collect while logged out");

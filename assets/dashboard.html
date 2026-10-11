@@ -146,6 +146,36 @@
     <script>
         const data = /*__AGY_DATA__*/null;
 
+        // Clock format detected from the user's system when the dashboard was
+        // generated ("12h" | "24h"). Browsers otherwise follow their UI
+        // language (e.g. en-US => AM/PM) and date-fns defaults to 12h.
+        const USE_12H = !!data && data.clock === '12h';
+        const TIME_OPTS = { hourCycle: USE_12H ? 'h12' : 'h23' };
+
+        function chartTimeOptions() {
+            return USE_12H
+                ? {
+                    displayFormats: {
+                        millisecond: 'h:mm:ss.SSS a',
+                        second: 'h:mm:ss a',
+                        minute: 'h:mm a',
+                        hour: 'h a',
+                        day: 'MMM d'
+                    },
+                    tooltipFormat: 'MMM d, yyyy, h:mm:ss a'
+                }
+                : {
+                    displayFormats: {
+                        millisecond: 'HH:mm:ss.SSS',
+                        second: 'HH:mm:ss',
+                        minute: 'HH:mm',
+                        hour: 'HH:mm',
+                        day: 'MMM d'
+                    },
+                    tooltipFormat: 'MMM d, yyyy, HH:mm:ss'
+                };
+        }
+
         function statusLabel(status) {
             switch (status) {
                 case 'Collecting': return '⏳ collecting';
@@ -224,7 +254,7 @@
             contentEl.style.display = 'block';
 
             const genDate = new Date(data.generated_at);
-            metaEl.textContent = `Generated: ${genDate.toLocaleString()} (${formatTimeAgo(genDate)})`;
+            metaEl.textContent = `Generated: ${genDate.toLocaleString(undefined, TIME_OPTS)} (${formatTimeAgo(genDate)})`;
 
             const tbody = document.getElementById('prognosis-rows');
             const grid = document.getElementById('charts-grid');
@@ -240,7 +270,7 @@
                 const atResetStr = p.at_reset != null ? `${(p.at_reset * 100).toFixed(1)}%` : '—';
                 const statusStr = statusLabel(p.status);
                 const lastDate = new Date(p.last_sample);
-                const lastSampleStr = `${lastDate.toLocaleTimeString()} (${formatTimeAgo(lastDate)})`;
+                const lastSampleStr = `${lastDate.toLocaleTimeString(undefined, TIME_OPTS)} (${formatTimeAgo(lastDate)})`;
 
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
@@ -336,12 +366,7 @@
                             scales: {
                                 x: {
                                     type: 'time',
-                                    time: {
-                                        displayFormats: {
-                                            hour: 'HH:mm',
-                                            day: 'MMM d'
-                                        }
-                                    },
+                                    time: chartTimeOptions(),
                                     grid: { color: 'rgba(255, 255, 255, 0.05)' },
                                     ticks: { color: '#94a3b8' }
                                 },
