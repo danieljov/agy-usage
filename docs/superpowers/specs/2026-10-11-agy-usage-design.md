@@ -1,7 +1,8 @@
 # agy-usage — Antigravity quota history, graphs & prognosis
 
 Date: 2026-10-11
-Status: Draft for review
+Status: Approved (revised after plan review)
+Repository: https://github.com/danieljov/agy-usage (MIT, default branch `main`)
 
 ## 1. Intent
 
@@ -47,7 +48,7 @@ unknown `window` value is stored but has no budget line.
 
 ## 3. Architecture
 
-One crate `agy-usage/` producing one binary `agy-usage`.
+One crate at the root of https://github.com/danieljov/agy-usage producing one binary `agy-usage`.
 
 ```mermaid
 flowchart LR
