@@ -4,6 +4,9 @@ use serde::Serialize;
 use crate::forecast::{BucketReport, Prognosis};
 
 const TEMPLATE: &str = include_str!("../assets/dashboard.html");
+const CHART_JS: &str = include_str!("../assets/vendor/chart.umd.min.js");
+const DATE_FNS_ADAPTER: &str =
+    include_str!("../assets/vendor/chartjs-adapter-date-fns.bundle.min.js");
 
 #[derive(Serialize)]
 struct CompactReport<'a> {
@@ -56,7 +59,10 @@ pub fn render(reports: &[BucketReport], generated_at: DateTime<Utc>, history_day
 
     let json = serde_json::to_string(&data).expect("failed to serialize dashboard data");
     let safe_json = json.replace('<', "\\u003c");
-    TEMPLATE.replace("/*__AGY_DATA__*/null", &safe_json)
+    TEMPLATE
+        .replace("/*__CHART_JS__*/", CHART_JS)
+        .replace("/*__DATE_FNS_ADAPTER__*/", DATE_FNS_ADAPTER)
+        .replace("/*__AGY_DATA__*/null", &safe_json)
 }
 
 #[cfg(test)]
@@ -229,6 +235,44 @@ mod tests {
         assert!(output.contains("decimation:"));
         assert!(output.contains("algorithm: 'min-max'"));
         assert!(output.contains("toFixed(1)"));
+    }
+
+    #[test]
+    fn renders_with_inlined_scripts_zero_external_cdns() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
+        let rep = make_report("G", "b1", "weekly", vec![]);
+        let html = render(&[rep], now, 30);
+
+        assert!(!html.contains("cdn.jsdelivr.net"));
+        assert!(!html.contains("<script src="));
+        assert!(html.contains("Chart.register"));
+        assert!(html.contains(CHART_JS));
+        assert!(html.contains(DATE_FNS_ADAPTER));
+    }
+
+    #[test]
+    fn vendored_scripts_contain_no_script_close_tag() {
+        assert!(!CHART_JS.to_lowercase().contains("</script"));
+        assert!(!DATE_FNS_ADAPTER.to_lowercase().contains("</script"));
+    }
+
+    #[test]
+    fn data_containing_placeholder_does_not_expand_recursively() {
+        let s = Sample {
+            ts: Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap(),
+            group: "/*__CHART_JS__*/".to_string(),
+            bucket_id: "b1".to_string(),
+            window: "weekly".to_string(),
+            remaining: 0.9,
+            reset_time: Utc.with_ymd_and_hms(2026, 10, 16, 12, 0, 0).unwrap(),
+        };
+        let rep = make_report("/*__CHART_JS__*/", "b1", "weekly", vec![s]);
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
+        let html = render(&[rep], now, 30);
+
+        let first_idx = html.find(CHART_JS).expect("CHART_JS should be present");
+        let second_idx = html[first_idx + CHART_JS.len()..].find(CHART_JS);
+        assert!(second_idx.is_none(), "CHART_JS was expanded multiple times");
     }
 
     fn extract_json(html: &str) -> String {
