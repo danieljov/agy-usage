@@ -89,11 +89,13 @@ All timestamps stored in UTC; rendered in local time.
 | `install-timer` / `uninstall-timer` | Manage `~/.config/systemd/user/agy-usage.{service,timer}` |
 
 Global flags: `--data-dir` (default `$XDG_DATA_HOME/agy-usage` →
-`~/.local/share/agy-usage`), `--tight-threshold` (default `0.10`).
+`~/.local/share/agy-usage`), `--tight-threshold` (default `0.10`),
+`--history-days` (HTML history, default `30`).
 
-TUI keys: `r` collect now and refresh, `1`–`4` focus one bucket full-screen,
-`Esc` back to grid, `q` quit. Layout: 2×2 grid when terminal ≥ 100 cols,
-otherwise stacked; prognosis table below.
+TUI keys: `r` collect now and refresh, `1`–`9` focus one bucket full-screen,
+`Esc` back to grid, `q` quit. Layout: 2-column grid when terminal ≥ 100 cols,
+otherwise stacked; prognosis table below. `show --once` falls back to plain
+text when stdout is not a terminal.
 
 ## 4. Forecast model
 
@@ -105,7 +107,8 @@ Per bucket (`group` + `bucket_id`), samples sorted by `ts`.
   `reset_time = now + window`, which must not start new windows), or
 - `remaining[i]` > `remaining[i-1]` + 0.005 (quota went up).
 
-The current window is the samples since the last boundary.
+The current window is the samples since the last boundary **with `ts ≥ start`**
+(drops idle pre-window samples).
 
 **Anchor.** "now" below means the latest sample's `ts`, which keeps the forecast
 deterministic. If `reset_time` ≤ anchor (stale data), the forecast is
@@ -114,13 +117,16 @@ deterministic. If `reset_time` ≤ anchor (stale data), the forecast is
 **Window start / end.** `end = reset_time` (latest sample).
 `start = end − window_length`.
 
+**Units.** Stored and computed as fractions (0..1) and fraction/hour; the UI
+displays them as % and %/h.
+
 **Budget line.** Linear from 100 % at `start` to 0 % at `end`.
 `budget_now = (end − now) / window_length`.
-`safe_rate = remaining_now / hours_until_reset` (%/h).
+`safe_rate = remaining_now / hours_until_reset`.
 
 **Burn rate.** Least-squares slope of `remaining` over `ts` for current-window
-samples within the lookback (weekly: 24 h, 5h: 1 h). `rate = max(0, −slope)` in
-%/h. Requires ≥ 2 samples spanning ≥ 15 min; otherwise status `Collecting`.
+samples within the lookback (weekly: 24 h, 5h: 1 h). `rate = max(0, −slope)`.
+Requires ≥ 2 samples spanning ≥ 15 min; otherwise status `Collecting`.
 
 **Projection.** From (`now`, `remaining_now`) with slope `−rate`:
 - `at_reset = max(0, remaining_now − rate × hours_until_reset)`
@@ -134,14 +140,16 @@ samples within the lookback (weekly: 24 h, 5h: 1 h). `rate = max(0, −slope)` i
 | `at_reset < tight_threshold` | ⚠️ Tight |
 | otherwise | ✅ On track |
 
-**Output struct** `Prognosis { group, bucket_id, window, remaining_now,
-reset_time, rate_per_h: Option<f64>, safe_rate_per_h, budget_now,
-at_reset: Option<f64>, empty_at: Option<DateTime>, status }`.
+**Output struct** `Prognosis { remaining_now, reset_time, last_sample,
+budget_now, rate_per_h, safe_rate_per_h, at_reset, empty_at, status }` — all
+derived numbers are `Option` (None when stale/unknown window/insufficient data).
+Group, bucket and window live on the enclosing `BucketReport`.
 
 Charts plot, for the current window: actual samples (line), budget (line from
 `start` to `end`), projection (from last sample to `empty_at` or `end`), and a
 vertical reset marker. The TUI's x-range is the current window; the HTML shows
-all stored history with window boundaries shaded.
+the last 30 days of history (`--history-days`) with window boundaries drawn as
+light vertical lines.
 
 ## 5. Error handling
 
@@ -149,23 +157,28 @@ all stored history with window boundaries shaded.
 |---|---|
 | `agy` missing / non-zero exit / not logged in / bad JSON | `collect` exits non-zero with message on stderr; nothing written |
 | Bucket disabled or missing `remaining_fraction` | Skipped |
+| All buckets disabled (0 samples) | `collect` exits non-zero; nothing written |
 | Corrupt JSONL line | Skipped with warning; rest loads |
-| Concurrent collects | Each sample batch written with one `write` on an `O_APPEND` file |
+| Concurrent collects | Each sample batch written with one `write` on an `O_APPEND` file; `dashboard.html` written via temp file + rename |
 | No samples at all | TUI/HTML show an empty-state message with the `install-timer` hint |
 | Data dir missing | Created on first `collect` |
+| Missed timer runs (suspend/off) | Timer uses `OnCalendar` + `Persistent=true` to catch up |
 
 ## 6. Testing
 
-TDD; `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check` must pass.
+TDD; `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` must pass.
 
 - `forecast`: constant burn; idle; mid-series reset; run-out before reset; single
-  sample; < 15 min span; tight/on-track threshold boundary; quota increase.
+  sample; < 15 min span; tight/on-track threshold boundary; quota increase;
+  sliding idle reset; idle-then-usage; stale data; unknown window.
 - `source`: parse fixture of real `/usage` JSON (`tests/fixtures/usage.json`);
   disabled bucket; malformed JSON.
 - `store`: round-trip; corrupt line skipped; append preserves existing lines.
-- `html`: output contains embedded data and 4 chart canvases; no-data state.
-- `tui`: `--once` render via ratatui `TestBackend` contains bucket titles and table.
+- `html`: embedded data for all reports; `</script>` escaping; history cap; no-data state.
+- `tui`: render via ratatui `TestBackend` contains bucket titles and table; tiny
+  terminal; >4 buckets; plain-text fallback.
 - `timer`: generated unit file contents (no `systemctl` call in tests).
+- CLI: `collect` end-to-end with a fake `agy` script.
 
 ## 7. Out of scope
 
