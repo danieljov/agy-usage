@@ -100,10 +100,16 @@ otherwise stacked; prognosis table below.
 Per bucket (`group` + `bucket_id`), samples sorted by `ts`.
 
 **Window detection.** A new window starts at sample *i* when either
-- `reset_time[i]` > `reset_time[i-1]` + 60 s (reset moved forward), or
+- `reset_time[i]` > `reset_time[i-1]` + 60 s **and** `reset_time[i-1]` ≤ `ts[i]`
+  (previous window expired; an idle bucket at 100 % reports a sliding
+  `reset_time = now + window`, which must not start new windows), or
 - `remaining[i]` > `remaining[i-1]` + 0.005 (quota went up).
 
 The current window is the samples since the last boundary.
+
+**Anchor.** "now" below means the latest sample's `ts`, which keeps the forecast
+deterministic. If `reset_time` ≤ anchor (stale data), the forecast is
+`Collecting` and the UI shows the sample age.
 
 **Window start / end.** `end = reset_time` (latest sample).
 `start = end − window_length`.
