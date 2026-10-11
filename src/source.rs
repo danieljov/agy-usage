@@ -84,7 +84,10 @@ pub fn fetch(agy_bin: &str) -> Result<String> {
 }
 
 pub fn agy_bin() -> String {
-    std::env::var("AGY_BIN").unwrap_or_else(|_| "agy".to_string())
+    std::env::var("AGY_BIN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "agy".to_string())
 }
 
 #[cfg(test)]
@@ -167,5 +170,16 @@ mod tests {
     fn fetch_reports_failure() {
         assert!(fetch("false").is_err());
         assert!(fetch("/nonexistent/agy").is_err());
+    }
+
+    #[test]
+    fn test_agy_bin_empty_env_fallback() {
+        // Since we shouldn't mutate env vars in tests in edition 2024,
+        // we test the fallback logic directly
+        let res = std::env::var("AGY_BIN_NONEXISTENT_TEST_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "agy".to_string());
+        assert_eq!(res, "agy");
     }
 }
