@@ -1254,11 +1254,19 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         use unicode_width::UnicodeWidthStr;
-        for y in 0..10 {
-            let mut line = String::new();
-            for cell in visible_cells(buffer, y, 80) {
-                line.push_str(cell.symbol());
-            }
+
+        let rendered_lines: Vec<String> = (0..10)
+            .map(|y| {
+                let mut line = String::new();
+                for cell in visible_cells(buffer, y, 80) {
+                    line.push_str(cell.symbol());
+                }
+                line
+            })
+            .collect();
+
+        // 1. Verify line widths and border endings for all box lines
+        for (y, line) in rendered_lines.iter().enumerate() {
             if line.starts_with('│') || line.starts_with('┌') || line.starts_with('└') {
                 assert_eq!(
                     line.as_str().width(),
@@ -1271,5 +1279,45 @@ mod tests {
                 );
             }
         }
+
+        // 2. Directly assert that the expected status strings appear in their respective rows
+        assert!(rendered_lines[2].contains("✅ on track"));
+        assert!(rendered_lines[3].contains("⚠  tight"));
+        assert!(rendered_lines[4].contains("❌ in 2h"));
+        assert!(rendered_lines[5].contains("⏳ collecting"));
+
+        // 3. Inspect the status cells directly for Tight at y=3:
+        // Column 57 has '⚠', which must have display width 1 (not wide 2),
+        // followed by two single-space cells at columns 58 and 59,
+        // and 'tight' starting at column 60.
+        let tight_icon_cell = &buffer[(57, 3)];
+        assert_eq!(tight_icon_cell.symbol(), "⚠");
+        assert_eq!(
+            tight_icon_cell.symbol().width(),
+            1,
+            "warning sign must be 1 column wide"
+        );
+        assert_eq!(buffer[(58, 3)].symbol(), " ");
+        assert_eq!(buffer[(59, 3)].symbol(), " ");
+        assert_eq!(buffer[(60, 3)].symbol(), "t");
+        assert_eq!(buffer[(61, 3)].symbol(), "i");
+        assert_eq!(buffer[(62, 3)].symbol(), "g");
+        assert_eq!(buffer[(63, 3)].symbol(), "h");
+        assert_eq!(buffer[(64, 3)].symbol(), "t");
+
+        // 4. Compare with 2-column emoji in OnTrack (y=2) and WillRunOut (y=4):
+        // '✅' at (57, 2) has display width 2, followed by ratatui reset placeholder at (58, 2),
+        // space at (59, 2), and text starting at (60, 2).
+        let check_cell = &buffer[(57, 2)];
+        assert_eq!(check_cell.symbol(), "✅");
+        assert_eq!(check_cell.symbol().width(), 2);
+        assert_eq!(buffer[(59, 2)].symbol(), " ");
+        assert_eq!(buffer[(60, 2)].symbol(), "o");
+
+        let cross_cell = &buffer[(57, 4)];
+        assert_eq!(cross_cell.symbol(), "❌");
+        assert_eq!(cross_cell.symbol().width(), 2);
+        assert_eq!(buffer[(59, 4)].symbol(), " ");
+        assert_eq!(buffer[(60, 4)].symbol(), "i");
     }
 }
