@@ -112,6 +112,21 @@ pub fn fetch(agy_bin: &str) -> Result<String> {
 }
 
 pub fn fetch_with_timeout(agy_bin: &str, timeout: std::time::Duration) -> Result<String> {
+    fetch_with_timeout_and_cancel(agy_bin, timeout, None, None)
+}
+
+pub fn fetch_with_timeout_and_cancel(
+    agy_bin: &str,
+    timeout: std::time::Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    child_pid: Option<&std::sync::atomic::AtomicU32>,
+) -> Result<String> {
+    if let Some(c) = cancel
+        && c.load(std::sync::atomic::Ordering::SeqCst)
+    {
+        bail!("fetch cancelled");
+    }
+
     let mut cmd = Command::new(agy_bin);
     cmd.args(["-p", "/usage", "--output-format", "json"])
         .stdout(std::process::Stdio::piped())
@@ -123,9 +138,45 @@ pub fn fetch_with_timeout(agy_bin: &str, timeout: std::time::Duration) -> Result
         cmd.process_group(0);
     }
 
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("failed to execute agy binary: {}", agy_bin))?;
+    let mut child = {
+        let mut attempts = 0;
+        loop {
+            if let Some(c) = cancel
+                && c.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                bail!("fetch cancelled");
+            }
+            match cmd.spawn() {
+                Ok(child) => break child,
+                Err(e)
+                    if (e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        || e.raw_os_error() == Some(26))
+                        && attempts < 20 =>
+                {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => {
+                    return Err(e)
+                        .with_context(|| format!("failed to execute agy binary: {}", agy_bin));
+                }
+            }
+        }
+    };
+
+    if let Some(cp) = child_pid {
+        cp.store(child.id(), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    struct PidGuard<'a>(Option<&'a std::sync::atomic::AtomicU32>);
+    impl<'a> Drop for PidGuard<'a> {
+        fn drop(&mut self) {
+            if let Some(cp) = self.0 {
+                cp.store(0, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+    let _pid_guard = PidGuard(child_pid);
 
     let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
     let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
@@ -139,15 +190,29 @@ pub fn fetch_with_timeout(agy_bin: &str, timeout: std::time::Duration) -> Result
         std::io::Read::read_to_end(&mut stderr_pipe, &mut buf).map(|_| buf)
     });
 
+    let kill_process_and_group = |child: &mut std::process::Child| {
+        #[cfg(unix)]
+        if let Ok(raw_pid) = i32::try_from(child.id())
+            && raw_pid > 0
+            && let Some(pid) = rustix::process::Pid::from_raw(raw_pid)
+        {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    };
+
     let start = std::time::Instant::now();
     let status = loop {
+        if let Some(c) = cancel
+            && c.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            kill_process_and_group(&mut child);
+            bail!("fetch cancelled");
+        }
+
         if start.elapsed() >= timeout {
-            #[cfg(unix)]
-            if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
-                let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-            }
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_process_and_group(&mut child);
             bail!("agy command timed out after {:?}", timeout);
         }
 
@@ -156,6 +221,9 @@ pub fn fetch_with_timeout(agy_bin: &str, timeout: std::time::Duration) -> Result
             && stdout_handle.is_finished()
             && stderr_handle.is_finished()
         {
+            if let Some(cp) = child_pid {
+                cp.store(0, std::sync::atomic::Ordering::SeqCst);
+            }
             break status;
         }
 
@@ -346,8 +414,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let slow_script = temp.path().join("slow.sh");
         {
+            use std::io::Write;
             use std::os::unix::fs::PermissionsExt;
-            std::fs::write(&slow_script, "#!/bin/sh\nexec sleep 10\n").unwrap();
+            let mut f = std::fs::File::create(&slow_script).unwrap();
+            f.write_all(b"#!/bin/sh\nexec sleep 10\n").unwrap();
+            f.sync_all().unwrap();
+            drop(f);
             std::fs::set_permissions(&slow_script, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let start = std::time::Instant::now();
@@ -362,7 +434,7 @@ mod tests {
             "took too long: {:?}",
             elapsed
         );
-        let err_msg = res.unwrap_err().to_string();
+        let err_msg = format!("{:#}", res.as_ref().unwrap_err());
         assert!(err_msg.contains("timed out"), "unexpected err: {}", err_msg);
     }
 
@@ -372,8 +444,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let parent_script = temp.path().join("parent.sh");
         {
+            use std::io::Write;
             use std::os::unix::fs::PermissionsExt;
-            std::fs::write(&parent_script, "#!/bin/sh\n(sleep 10 >&1) &\nexit 0\n").unwrap();
+            let mut f = std::fs::File::create(&parent_script).unwrap();
+            f.write_all(b"#!/bin/sh\n(sleep 10 >&1) &\nexit 0\n")
+                .unwrap();
+            f.sync_all().unwrap();
+            drop(f);
             std::fs::set_permissions(&parent_script, std::fs::Permissions::from_mode(0o755))
                 .unwrap();
         }
@@ -389,6 +466,81 @@ mod tests {
             "grandchild held pipe open beyond deadline: {:?}",
             elapsed
         );
+        let err_msg = format!("{:#}", res.as_ref().unwrap_err());
+        assert!(err_msg.contains("timed out"), "unexpected err: {}", err_msg);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fetch_cancel_aborts_and_kills_process() {
+        let temp = tempfile::tempdir().unwrap();
+        let slow_script = temp.path().join("slow.sh");
+        {
+            use std::io::Write;
+            use std::os::unix::fs::PermissionsExt;
+            let mut f = std::fs::File::create(&slow_script).unwrap();
+            f.write_all(b"#!/bin/sh\n(sleep 10 >&1) &\nexec sleep 10\n")
+                .unwrap();
+            f.sync_all().unwrap();
+            drop(f);
+            std::fs::set_permissions(&slow_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let child_pid = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        let script_path = slow_script.to_str().unwrap().to_string();
+        let cancel_thread = cancel.clone();
+        let child_pid_thread = child_pid.clone();
+
+        let handle = std::thread::spawn(move || {
+            fetch_with_timeout_and_cancel(
+                &script_path,
+                std::time::Duration::from_secs(10),
+                Some(&cancel_thread),
+                Some(&child_pid_thread),
+            )
+        });
+
+        let wait_start = std::time::Instant::now();
+        while child_pid.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            assert!(wait_start.elapsed() < std::time::Duration::from_secs(2));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let recorded_pid = child_pid.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(recorded_pid > 0);
+
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let start = std::time::Instant::now();
+        let res = handle.join().unwrap();
+        assert!(res.is_err());
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "cancel took too long (process group not killed): {:?}",
+            elapsed
+        );
+        let err_msg = format!("{:#}", res.unwrap_err());
+        assert!(
+            err_msg.contains("fetch cancelled"),
+            "unexpected err: {}",
+            err_msg
+        );
+        assert_eq!(child_pid.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn fetch_cancel_before_spawn_aborts() {
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        let res = fetch_with_timeout_and_cancel(
+            "dummy_nonexistent_binary",
+            std::time::Duration::from_secs(10),
+            Some(&cancel),
+            None,
+        );
+        assert!(res.is_err());
+        let err_msg = format!("{:#}", res.unwrap_err());
+        assert!(err_msg.contains("fetch cancelled"));
     }
 
     #[test]

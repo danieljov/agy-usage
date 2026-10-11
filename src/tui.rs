@@ -584,6 +584,33 @@ enum RefreshOutcome {
     Error(String),
 }
 
+struct ShutdownWorkerGuard {
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    child_pid: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for ShutdownWorkerGuard {
+    fn drop(&mut self) {
+        if let Some(h) = self.handle.take() {
+            self.cancel_flag
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            #[cfg(unix)]
+            {
+                let pid = self.child_pid.load(std::sync::atomic::Ordering::SeqCst);
+                if let Ok(raw_pid) = i32::try_from(pid)
+                    && raw_pid > 0
+                    && let Some(rpid) = rustix::process::Pid::from_raw(raw_pid)
+                {
+                    let _ =
+                        rustix::process::kill_process_group(rpid, rustix::process::Signal::KILL);
+                }
+            }
+            let _ = h.join();
+        }
+    }
+}
+
 pub fn run(data_dir: &Path, tight: f64, agy_bin: &str) -> Result<()> {
     let mut terminal = ratatui::try_init()?;
     let result = (|| -> Result<()> {
@@ -594,12 +621,18 @@ pub fn run(data_dir: &Path, tight: f64, agy_bin: &str) -> Result<()> {
 
         let (refresh_tx, refresh_rx) = std::sync::mpsc::channel::<RefreshOutcome>();
         let mut is_refreshing = false;
-        let mut refresh_handle: Option<std::thread::JoinHandle<()>> = None;
+        let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let child_pid = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let mut worker_guard = ShutdownWorkerGuard {
+            cancel_flag: cancel_flag.clone(),
+            child_pid: child_pid.clone(),
+            handle: None,
+        };
 
         loop {
             while let Ok(outcome) = refresh_rx.try_recv() {
                 is_refreshing = false;
-                if let Some(h) = refresh_handle.take() {
+                if let Some(h) = worker_guard.handle.take() {
                     let _ = h.join();
                 }
                 match outcome {
@@ -616,8 +649,13 @@ pub fn run(data_dir: &Path, tight: f64, agy_bin: &str) -> Result<()> {
                 }
             }
 
-            if is_refreshing && refresh_handle.as_ref().is_some_and(|h| h.is_finished()) {
-                if let Some(h) = refresh_handle.take()
+            if is_refreshing
+                && worker_guard
+                    .handle
+                    .as_ref()
+                    .is_some_and(|h| h.is_finished())
+            {
+                if let Some(h) = worker_guard.handle.take()
                     && h.join().is_err()
                 {
                     state.message = Some("Refresh worker panicked".to_string());
@@ -657,10 +695,19 @@ pub fn run(data_dir: &Path, tight: f64, agy_bin: &str) -> Result<()> {
                             let tx = refresh_tx.clone();
                             let agy = agy_bin.to_string();
                             let sp = samples_path.clone();
-                            refresh_handle = Some(std::thread::spawn(move || {
+                            let thread_cancel = cancel_flag.clone();
+                            let thread_child_pid = child_pid.clone();
+                            thread_cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+                            thread_child_pid.store(0, std::sync::atomic::Ordering::SeqCst);
+                            worker_guard.handle = Some(std::thread::spawn(move || {
                                 let outcome =
                                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                                        || match crate::source::fetch(&agy) {
+                                        || match crate::source::fetch_with_timeout_and_cancel(
+                                            &agy,
+                                            std::time::Duration::from_secs(25),
+                                            Some(&thread_cancel),
+                                            Some(&thread_child_pid),
+                                        ) {
                                             Ok(json) => {
                                                 match crate::source::parse_usage(&json, Utc::now())
                                                 {
@@ -922,5 +969,63 @@ mod tests {
         }
 
         assert!(text.contains("Esc: Grid  1-9: Focus  r: Refresh  q: Quit"));
+    }
+
+    #[test]
+    fn test_shutdown_worker_guard_cancels_and_joins_on_drop() {
+        let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let child_pid = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        let cancel_clone = cancel_flag.clone();
+        let handle = std::thread::spawn(move || {
+            while !cancel_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+
+        {
+            let _guard = ShutdownWorkerGuard {
+                cancel_flag: cancel_flag.clone(),
+                child_pid: child_pid.clone(),
+                handle: Some(handle),
+            };
+            // Guard dropped here
+        }
+
+        assert!(cancel_flag.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_shutdown_worker_guard_kills_child_process_on_drop() {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("10");
+        cmd.process_group(0);
+        let mut child = cmd.spawn().unwrap();
+        let pid = child.id();
+
+        let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let child_pid = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(pid));
+
+        let cancel_clone = cancel_flag.clone();
+        let handle = std::thread::spawn(move || {
+            while !cancel_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+
+        {
+            let _guard = ShutdownWorkerGuard {
+                cancel_flag: cancel_flag.clone(),
+                child_pid: child_pid.clone(),
+                handle: Some(handle),
+            };
+            // Guard dropped here - kills process group and child
+        }
+
+        // Child process should have been killed by SIGKILL
+        let status = child.wait().unwrap();
+        assert!(!status.success());
     }
 }
