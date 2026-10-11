@@ -1,0 +1,167 @@
+# agy-usage — Antigravity quota history, graphs & prognosis
+
+Date: 2026-10-11
+Status: Draft for review
+
+## 1. Intent
+
+**Goal (user-stated):** See Antigravity quota usage over time, as graphs, for the
+weekly limit and the five-hour limit, for each model group, including a prognosis.
+
+**Agreed decisions:**
+
+| Topic | Decision |
+|---|---|
+| History | Start collecting now; no backfill from conversation logs |
+| Views | Interactive terminal dashboard **and** self-contained HTML dashboard |
+| Prognosis | Burn-rate projection to reset **plus** an even-pace budget line and safe rate |
+| Language | Rust (single binary), ratatui for the TUI |
+
+**Assumptions:** Linux with systemd user services; `agy` on `PATH` and logged in;
+a C linker (`cc`) is available for building.
+
+**Success criteria:**
+1. A systemd user timer stores a sample of every quota bucket every 5 minutes.
+2. `agy-usage show` displays 4 charts (Gemini / Claude+GPT × Weekly / 5h) with
+   actual, budget and projection series, plus a prognosis table.
+3. `agy-usage html` produces one HTML file showing the same charts and table.
+4. Prognosis reports, per bucket: projected % at reset, projected empty time (if
+   before reset), current rate, safe rate, and a status (✅ / ⚠️ / ❌).
+
+## 2. Data source
+
+`agy -p "/usage" --output-format json` (does not spend quota). Only the structured
+part is used:
+
+```
+command.data.groups[]            name: "Gemini Models" | "Claude and GPT models"
+  .buckets[]                     id: "gemini-weekly" | "gemini-5h" | "3p-weekly" | "3p-5h"
+    .window                      "weekly" | "5h"
+    .remaining_fraction          float 0..1   (absent/disabled → bucket skipped)
+    .reset_time                  RFC 3339 UTC
+```
+
+Group and bucket names are read from the JSON, never hard-coded, so new groups
+appear automatically. Window lengths: `weekly` = 7 days, `5h` = 5 hours. An
+unknown `window` value is stored but has no budget line.
+
+## 3. Architecture
+
+One crate `agy-usage/` producing one binary `agy-usage`.
+
+```mermaid
+flowchart LR
+  T["systemd user timer (5 min)"] --> C["agy-usage collect"]
+  C -->|"agy -p /usage --output-format json"| A[agy]
+  C -->|append| S[("samples.jsonl")]
+  C --> H["dashboard.html"]
+  S --> F["forecast (pure)"]
+  F --> TUI["agy-usage show"]
+  F --> H
+```
+
+| Module | Responsibility | Depends on |
+|---|---|---|
+| `source` | Run `agy`, parse JSON → `Vec<Sample>` | `serde_json`, `std::process` |
+| `store` | Append/read JSONL | `serde_json` |
+| `forecast` | Windows, burn rate, budget, prognosis — no I/O | `chrono` |
+| `tui` | ratatui dashboard, `--once` static frame | `ratatui`, `crossterm` |
+| `html` | Render self-contained HTML | `serde_json` |
+| `timer` | Write/remove systemd units | `std::fs`, `systemctl` |
+| `main` | `clap` CLI wiring | all |
+
+### 3.1 Sample record (one JSONL line per bucket per collection)
+
+```json
+{"ts":"2026-10-11T17:20:00Z","group":"Claude and GPT models","bucket_id":"3p-weekly",
+ "window":"weekly","remaining":0.6094,"reset_time":"2026-10-16T20:52:27Z"}
+```
+
+All timestamps stored in UTC; rendered in local time.
+
+### 3.2 CLI
+
+| Command | Behaviour |
+|---|---|
+| `collect [--no-html]` | Fetch, append samples, regenerate HTML (unless `--no-html`) |
+| `show [--once]` | Interactive TUI; `--once` prints one frame and exits |
+| `html [--open] [--out PATH]` | Write dashboard; optionally open with `xdg-open` |
+| `install-timer` / `uninstall-timer` | Manage `~/.config/systemd/user/agy-usage.{service,timer}` |
+
+Global flags: `--data-dir` (default `$XDG_DATA_HOME/agy-usage` →
+`~/.local/share/agy-usage`), `--tight-threshold` (default `0.10`).
+
+TUI keys: `r` collect now and refresh, `1`–`4` focus one bucket full-screen,
+`Esc` back to grid, `q` quit. Layout: 2×2 grid when terminal ≥ 100 cols,
+otherwise stacked; prognosis table below.
+
+## 4. Forecast model
+
+Per bucket (`group` + `bucket_id`), samples sorted by `ts`.
+
+**Window detection.** A new window starts at sample *i* when either
+- `reset_time[i]` > `reset_time[i-1]` + 60 s (reset moved forward), or
+- `remaining[i]` > `remaining[i-1]` + 0.005 (quota went up).
+
+The current window is the samples since the last boundary.
+
+**Window start / end.** `end = reset_time` (latest sample).
+`start = end − window_length`.
+
+**Budget line.** Linear from 100 % at `start` to 0 % at `end`.
+`budget_now = (end − now) / window_length`.
+`safe_rate = remaining_now / hours_until_reset` (%/h).
+
+**Burn rate.** Least-squares slope of `remaining` over `ts` for current-window
+samples within the lookback (weekly: 24 h, 5h: 1 h). `rate = max(0, −slope)` in
+%/h. Requires ≥ 2 samples spanning ≥ 15 min; otherwise status `Collecting`.
+
+**Projection.** From (`now`, `remaining_now`) with slope `−rate`:
+- `at_reset = max(0, remaining_now − rate × hours_until_reset)`
+- `empty_at = now + remaining_now / rate` if `rate > 0` and before `end`
+
+**Status.**
+| Condition | Status |
+|---|---|
+| insufficient data | ⏳ Collecting |
+| `empty_at` before reset | ❌ Will run out |
+| `at_reset < tight_threshold` | ⚠️ Tight |
+| otherwise | ✅ On track |
+
+**Output struct** `Prognosis { group, bucket_id, window, remaining_now,
+reset_time, rate_per_h: Option<f64>, safe_rate_per_h, budget_now,
+at_reset: Option<f64>, empty_at: Option<DateTime>, status }`.
+
+Charts plot, for the current window: actual samples (line), budget (line from
+`start` to `end`), projection (from last sample to `empty_at` or `end`), and a
+vertical reset marker. The TUI's x-range is the current window; the HTML shows
+all stored history with window boundaries shaded.
+
+## 5. Error handling
+
+| Case | Behaviour |
+|---|---|
+| `agy` missing / non-zero exit / not logged in / bad JSON | `collect` exits non-zero with message on stderr; nothing written |
+| Bucket disabled or missing `remaining_fraction` | Skipped |
+| Corrupt JSONL line | Skipped with warning; rest loads |
+| Concurrent collects | Each sample batch written with one `write` on an `O_APPEND` file |
+| No samples at all | TUI/HTML show an empty-state message with the `install-timer` hint |
+| Data dir missing | Created on first `collect` |
+
+## 6. Testing
+
+TDD; `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check` must pass.
+
+- `forecast`: constant burn; idle; mid-series reset; run-out before reset; single
+  sample; < 15 min span; tight/on-track threshold boundary; quota increase.
+- `source`: parse fixture of real `/usage` JSON (`tests/fixtures/usage.json`);
+  disabled bucket; malformed JSON.
+- `store`: round-trip; corrupt line skipped; append preserves existing lines.
+- `html`: output contains embedded data and 4 chart canvases; no-data state.
+- `tui`: `--once` render via ratatui `TestBackend` contains bucket titles and table.
+- `timer`: generated unit file contents (no `systemctl` call in tests).
+
+## 7. Out of scope
+
+Backfilling from conversation logs, pattern-based forecasting, notifications,
+web server, config file, non-Linux schedulers.
