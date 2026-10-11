@@ -1218,4 +1218,58 @@ mod tests {
         assert!(reports.is_some());
         assert_eq!(acc, vec![s2]);
     }
+
+    #[test]
+    fn all_status_variants_render_at_exact_terminal_width() {
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
+        let base = &make_test_reports()[0];
+
+        let statuses = [
+            Status::OnTrack,
+            Status::Tight,
+            Status::WillRunOut,
+            Status::Collecting,
+        ];
+        let reports: Vec<BucketReport> = statuses
+            .into_iter()
+            .enumerate()
+            .map(|(i, status)| {
+                let mut rep = base.clone();
+                rep.group = format!("Group {}", i + 1);
+                rep.prognosis.status = status;
+                if status == Status::WillRunOut {
+                    rep.prognosis.empty_at = Some(now + chrono::Duration::hours(2));
+                }
+                rep
+            })
+            .collect();
+
+        terminal
+            .draw(|f| {
+                draw_table(f, &reports, f.area(), now, None);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        use unicode_width::UnicodeWidthStr;
+        for y in 0..10 {
+            let mut line = String::new();
+            for cell in visible_cells(buffer, y, 80) {
+                line.push_str(cell.symbol());
+            }
+            if line.starts_with('│') || line.starts_with('┌') || line.starts_with('└') {
+                assert_eq!(
+                    line.as_str().width(),
+                    80,
+                    "line at y={y} display width must be exactly 80: {line}",
+                );
+                assert!(
+                    line.ends_with('│') || line.ends_with('┐') || line.ends_with('┘'),
+                    "line at y={y} must end with box border character: {line}",
+                );
+            }
+        }
+    }
 }

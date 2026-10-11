@@ -16,7 +16,7 @@ impl Status {
         match self {
             Status::Collecting => "⏳ collecting",
             Status::WillRunOut => "❌ will run out",
-            Status::Tight => "⚠️ tight",
+            Status::Tight => "⚠  tight",
             Status::OnTrack => "✅ on track",
         }
     }
@@ -668,7 +668,7 @@ mod tests {
 
         // OnTrack, Tight, Collecting
         assert_eq!(Status::OnTrack.label_with_time(None, now), "✅ on track");
-        assert_eq!(Status::Tight.label_with_time(None, now), "⚠️ tight");
+        assert_eq!(Status::Tight.label_with_time(None, now), "⚠  tight");
         assert_eq!(
             Status::Collecting.label_with_time(None, now),
             "⏳ collecting"
