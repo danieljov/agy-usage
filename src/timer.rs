@@ -4,7 +4,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-fn encode_unit_path(path: &Path) -> Result<String> {
+fn encode_unit_path(path: &Path, escape_dollar: bool) -> Result<String> {
     let abs = std::path::absolute(path)
         .with_context(|| format!("failed to make path absolute: {}", path.display()))?;
     let s = abs
@@ -17,7 +17,7 @@ fn encode_unit_path(path: &Path) -> Result<String> {
     for c in s.chars() {
         match c {
             '%' => escaped.push_str("%%"),
-            '$' => escaped.push_str("$$"),
+            '$' if escape_dollar => escaped.push_str("$$"),
             '\\' => escaped.push_str("\\\\"),
             '"' => escaped.push_str("\\\""),
             other => escaped.push(other),
@@ -27,9 +27,9 @@ fn encode_unit_path(path: &Path) -> Result<String> {
 }
 
 pub fn unit_files(exe: &Path, agy_bin: &Path, data_dir: &Path) -> Result<(String, String)> {
-    let enc_exe = encode_unit_path(exe)?;
-    let enc_agy = encode_unit_path(agy_bin)?;
-    let enc_data = encode_unit_path(data_dir)?;
+    let enc_exe = encode_unit_path(exe, true)?;
+    let enc_agy = encode_unit_path(agy_bin, false)?;
+    let enc_data = encode_unit_path(data_dir, true)?;
 
     let service = format!(
         r#"[Unit]
@@ -166,7 +166,7 @@ mod tests {
 
         let (service, _timer) = unit_files(exe, agy, data).unwrap();
 
-        assert!(service.contains("Environment=\"AGY_BIN=/opt/%%h/$$USER/bin/agy\""));
+        assert!(service.contains("Environment=\"AGY_BIN=/opt/%%h/$USER/bin/agy\""));
         assert!(service.contains(
             "ExecStart=\"/bin/agy%%u$$test\\\"bar\" --data-dir \"/var/data/$$DIR/%%n\" collect"
         ));

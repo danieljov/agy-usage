@@ -95,9 +95,6 @@ pub fn fetch_with_timeout(agy_bin: &str, timeout: std::time::Duration) -> Result
 
     let start = std::time::Instant::now();
     let status = loop {
-        if let Some(status) = child.try_wait().context("error waiting for agy process")? {
-            break status;
-        }
         if start.elapsed() >= timeout {
             #[cfg(unix)]
             if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
@@ -107,6 +104,15 @@ pub fn fetch_with_timeout(agy_bin: &str, timeout: std::time::Duration) -> Result
             let _ = child.wait();
             bail!("agy command timed out after {:?}", timeout);
         }
+
+        let child_done = child.try_wait().context("error waiting for agy process")?;
+        if let Some(status) = child_done
+            && stdout_handle.is_finished()
+            && stderr_handle.is_finished()
+        {
+            break status;
+        }
+
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
 
@@ -319,5 +325,30 @@ mod tests {
         );
         let err_msg = res.unwrap_err().to_string();
         assert!(err_msg.contains("timed out"), "unexpected err: {}", err_msg);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fetch_timeout_kills_grandchild_processes() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent_script = temp.path().join("parent.sh");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&parent_script, "#!/bin/sh\n(sleep 10 >&1) &\nexit 0\n").unwrap();
+            std::fs::set_permissions(&parent_script, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let start = std::time::Instant::now();
+        let res = fetch_with_timeout(
+            parent_script.to_str().unwrap(),
+            std::time::Duration::from_millis(200),
+        );
+        assert!(res.is_err());
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "grandchild held pipe open beyond deadline: {:?}",
+            elapsed
+        );
     }
 }
