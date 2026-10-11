@@ -399,25 +399,128 @@ pub fn render_plain(
     lines.join("\n")
 }
 
+fn push_fg_color(out: &mut String, color: Color) {
+    match color {
+        Color::Reset => out.push_str("\x1b[39m"),
+        Color::Black => out.push_str("\x1b[30m"),
+        Color::Red => out.push_str("\x1b[31m"),
+        Color::Green => out.push_str("\x1b[32m"),
+        Color::Yellow => out.push_str("\x1b[33m"),
+        Color::Blue => out.push_str("\x1b[34m"),
+        Color::Magenta => out.push_str("\x1b[35m"),
+        Color::Cyan => out.push_str("\x1b[36m"),
+        Color::Gray => out.push_str("\x1b[37m"),
+        Color::DarkGray => out.push_str("\x1b[90m"),
+        Color::LightRed => out.push_str("\x1b[91m"),
+        Color::LightGreen => out.push_str("\x1b[92m"),
+        Color::LightYellow => out.push_str("\x1b[93m"),
+        Color::LightBlue => out.push_str("\x1b[94m"),
+        Color::LightMagenta => out.push_str("\x1b[95m"),
+        Color::LightCyan => out.push_str("\x1b[96m"),
+        Color::White => out.push_str("\x1b[97m"),
+        Color::Indexed(i) => out.push_str(&format!("\x1b[38;5;{i}m")),
+        Color::Rgb(r, g, b) => out.push_str(&format!("\x1b[38;2;{r};{g};{b}m")),
+    }
+}
+
+fn push_bg_color(out: &mut String, color: Color) {
+    match color {
+        Color::Reset => out.push_str("\x1b[49m"),
+        Color::Black => out.push_str("\x1b[40m"),
+        Color::Red => out.push_str("\x1b[41m"),
+        Color::Green => out.push_str("\x1b[42m"),
+        Color::Yellow => out.push_str("\x1b[43m"),
+        Color::Blue => out.push_str("\x1b[44m"),
+        Color::Magenta => out.push_str("\x1b[45m"),
+        Color::Cyan => out.push_str("\x1b[46m"),
+        Color::Gray => out.push_str("\x1b[47m"),
+        Color::DarkGray => out.push_str("\x1b[100m"),
+        Color::LightRed => out.push_str("\x1b[101m"),
+        Color::LightGreen => out.push_str("\x1b[102m"),
+        Color::LightYellow => out.push_str("\x1b[103m"),
+        Color::LightBlue => out.push_str("\x1b[104m"),
+        Color::LightMagenta => out.push_str("\x1b[105m"),
+        Color::LightCyan => out.push_str("\x1b[106m"),
+        Color::White => out.push_str("\x1b[107m"),
+        Color::Indexed(i) => out.push_str(&format!("\x1b[48;5;{i}m")),
+        Color::Rgb(r, g, b) => out.push_str(&format!("\x1b[48;2;{r};{g};{b}m")),
+    }
+}
+
+pub fn render_ansi(
+    reports: &[BucketReport],
+    now: DateTime<Utc>,
+    width: u16,
+    height: u16,
+) -> String {
+    let backend = ratatui::backend::TestBackend::new(width, height);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+    let state = ViewState::default();
+    terminal
+        .draw(|f| draw(f, reports, &state, now))
+        .expect("draw failed");
+    let buffer = terminal.backend().buffer();
+
+    let mut out = String::new();
+    for y in 0..height {
+        let mut current_fg = Color::Reset;
+        let mut current_bg = Color::Reset;
+        let mut current_bold = false;
+        let mut line_buf = String::new();
+
+        for x in 0..width {
+            let cell = &buffer[(x, y)];
+            let is_bold = cell.modifier.contains(Modifier::BOLD);
+
+            if is_bold != current_bold {
+                current_bold = is_bold;
+                if is_bold {
+                    line_buf.push_str("\x1b[1m");
+                } else {
+                    line_buf.push_str("\x1b[22m");
+                }
+            }
+
+            if cell.fg != current_fg {
+                current_fg = cell.fg;
+                push_fg_color(&mut line_buf, current_fg);
+            }
+
+            if cell.bg != current_bg {
+                current_bg = cell.bg;
+                push_bg_color(&mut line_buf, current_bg);
+            }
+
+            line_buf.push_str(cell.symbol());
+        }
+
+        if current_bold || current_fg != Color::Reset || current_bg != Color::Reset {
+            line_buf.push_str("\x1b[0m");
+        }
+
+        out.push_str(line_buf.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
 pub fn print_once(reports: &[BucketReport], now: DateTime<Utc>) -> Result<()> {
     let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((120, 40));
-    if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
-        let h = height.clamp(5, 40);
-        let options = ratatui::TerminalOptions {
-            viewport: ratatui::Viewport::Inline(h),
-        };
-        if let Ok(mut terminal) = ratatui::try_init_with_options(options) {
-            let state = ViewState::default();
-            let res = terminal.draw(|f| draw(f, reports, &state, now));
-            ratatui::restore();
-            println!();
-            return res.map(|_| ()).map_err(Into::into);
-        }
+    let needed = if reports.is_empty() {
+        5
+    } else {
+        let cols = if width >= 100 { 2 } else { 1 };
+        let num_rows = reports.len().div_ceil(cols) as u16;
+        let table_h = reports.len() as u16 + 3;
+        (num_rows * 9) + table_h + 1
+    };
+    let h = needed.min(height.saturating_sub(2)).clamp(10, 36);
+
+    if std::io::stdout().is_terminal() {
+        print!("{}", render_ansi(reports, now, width.max(80), h));
+    } else {
+        println!("{}", render_plain(reports, now, 120, 40));
     }
-    println!(
-        "{}",
-        render_plain(reports, now, width.max(80), height.clamp(5, 40))
-    );
     Ok(())
 }
 
@@ -606,5 +709,16 @@ mod tests {
         assert_eq!(lines.len(), 40);
         assert!(text.contains("Gemini Models · Weekly"));
         assert!(!text.contains('\x1b'));
+    }
+
+    #[test]
+    fn render_ansi_text() {
+        let reports = make_test_reports();
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
+        let text = render_ansi(&reports, now, 120, 40);
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert_eq!(lines.len(), 41); // 40 lines + trailing newline
+        assert!(text.contains("Gemini Models · Weekly"));
+        assert!(text.contains('\x1b'));
     }
 }
