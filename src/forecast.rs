@@ -89,7 +89,7 @@ pub fn prognose(current: &[Sample], tight: f64) -> Prognosis {
         let l_hours = dur.num_milliseconds() as f64 / 3_600_000.0;
         hours_left / l_hours
     });
-    let safe_rate_per_h = Some(r0 / hours_left);
+    let safe_rate_per_h = Some(r0.max(0.0) / hours_left);
 
     let rate_samples: Vec<&Sample> = match lb_dur {
         Some(lb) => {
@@ -104,6 +104,11 @@ pub fn prognose(current: &[Sample], tight: f64) -> Prognosis {
             >= Duration::minutes(15);
 
     if !has_min_data {
+        let (status, empty_at) = if r0 <= 0.0 {
+            (Status::WillRunOut, Some(t0))
+        } else {
+            (Status::Collecting, None)
+        };
         return Prognosis {
             remaining_now: r0,
             reset_time: end,
@@ -112,8 +117,8 @@ pub fn prognose(current: &[Sample], tight: f64) -> Prognosis {
             rate_per_h: None,
             safe_rate_per_h,
             at_reset: None,
-            empty_at: None,
-            status: Status::Collecting,
+            empty_at,
+            status,
         };
     }
 
@@ -148,17 +153,30 @@ pub fn prognose(current: &[Sample], tight: f64) -> Prognosis {
     } else {
         0.0
     };
-    let rate = (-slope).max(0.0);
+    // Treat |slope| < 1e-6 as zero slope to prevent floating-point noise artifacts
+    let rate = if slope.abs() < 1e-6 {
+        0.0
+    } else {
+        (-slope).max(0.0)
+    };
     let rate_per_h = Some(rate);
     let at_reset_val = (r0 - rate * hours_left).max(0.0);
     let at_reset = Some(at_reset_val);
 
-    let empty_at = if rate > 0.0 {
+    let empty_at = if r0 <= 0.0 {
+        Some(t0)
+    } else if rate > 0.0 {
         let hours_to_empty = r0 / rate;
         if hours_to_empty < hours_left {
-            let ms = (hours_to_empty * 3_600_000.0).round() as i64;
-            t0.checked_add_signed(Duration::milliseconds(ms))
-                .filter(|&empty_time| empty_time < end)
+            let ms_f = (hours_to_empty * 3_600_000.0).round();
+            if ms_f.is_finite() && ms_f >= 0.0 && ms_f <= i64::MAX as f64 {
+                let ms = ms_f as i64;
+                Duration::try_milliseconds(ms)
+                    .and_then(|dur| t0.checked_add_signed(dur))
+                    .filter(|&empty_time| empty_time < end)
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -564,5 +582,41 @@ mod tests {
         assert_eq!(reports[2].bucket_id, "gemini-weekly");
         assert_eq!(reports[3].bucket_id, "gemini-5h");
         assert_eq!(reports[4].bucket_id, "custom-1");
+    }
+
+    #[test]
+    fn exhausted_bucket_zero_or_negative_r0() {
+        let t0 = base_time();
+        let samples_zero = vec![s(0, 0.0, None), s(30, 0.0, None)];
+        let p_zero = prognose(&samples_zero, 0.10);
+        assert_eq!(p_zero.status, Status::WillRunOut);
+        assert_eq!(p_zero.empty_at, Some(t0 + Duration::minutes(30)));
+
+        let samples_neg = vec![s(0, -0.05, None), s(30, -0.05, None)];
+        let p_neg = prognose(&samples_neg, 0.10);
+        assert_eq!(p_neg.status, Status::WillRunOut);
+        assert_eq!(p_neg.empty_at, Some(t0 + Duration::minutes(30)));
+    }
+
+    #[test]
+    fn slope_epsilon_noise_clamped_to_zero() {
+        // Samples with a tiny drift less than 1e-6 / hour
+        let samples = vec![s(0, 0.5000000001, None), s(60, 0.50, None)];
+        let p = prognose(&samples, 0.10);
+        assert_eq!(p.rate_per_h, Some(0.0));
+        assert_eq!(p.empty_at, None);
+        assert_eq!(p.status, Status::OnTrack);
+    }
+
+    #[test]
+    fn chrono_saturation_negative_quota_no_panic() {
+        let mut samples = Vec::new();
+        // 20 samples with negative quota: IEEE-754 least squares can produce ~1e-33 slope
+        for i in 0..20 {
+            samples.push(s(i * 5, -0.001, None));
+        }
+        let p = prognose(&samples, 0.10);
+        assert_eq!(p.status, Status::WillRunOut);
+        assert_eq!(p.empty_at, Some(samples.last().unwrap().ts));
     }
 }

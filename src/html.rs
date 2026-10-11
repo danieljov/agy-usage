@@ -218,6 +218,19 @@ mod tests {
         std::fs::write("target/demo.html", html).unwrap();
     }
 
+    #[test]
+    fn chartjs_tooltips_and_decimation_config() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
+        let output = render(&[], now, 30);
+        assert!(output.contains("parsing: false"));
+        assert!(output.contains("mode: 'nearest'"));
+        assert!(output.contains("axis: 'x'"));
+        assert!(output.contains("tension: 0"));
+        assert!(output.contains("decimation:"));
+        assert!(output.contains("algorithm: 'min-max'"));
+        assert!(output.contains("toFixed(1)"));
+    }
+
     fn extract_json(html: &str) -> String {
         let prefix = "const data = ";
         let start = html.find(prefix).expect("prefix not found") + prefix.len();

@@ -279,7 +279,7 @@
                         backgroundColor: '#38bdf8',
                         borderWidth: 2,
                         pointRadius: rep.series.length > 60 ? 0 : 2,
-                        tension: 0.1,
+                        tension: 0,
                     });
                 }
 
@@ -329,9 +329,10 @@
                         type: 'line',
                         data: { datasets },
                         options: {
+                            parsing: false,
                             responsive: true,
                             maintainAspectRatio: false,
-                            interaction: { mode: 'index', intersect: false },
+                            interaction: { mode: 'nearest', axis: 'x', intersect: false },
                             scales: {
                                 x: {
                                     type: 'time',
@@ -355,6 +356,18 @@
                                 }
                             },
                             plugins: {
+                                decimation: {
+                                    enabled: true,
+                                    algorithm: 'min-max',
+                                },
+                                tooltip: {
+                                    callbacks: {
+                                        label: (ctx) => {
+                                            const label = ctx.dataset.label ? `${ctx.dataset.label}: ` : '';
+                                            return ctx.parsed?.y != null ? `${label}${ctx.parsed.y.toFixed(1)}%` : label;
+                                        }
+                                    }
+                                },
                                 legend: {
                                     labels: { color: '#94a3b8', boxWidth: 12 }
                                 },
