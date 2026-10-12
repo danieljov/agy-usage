@@ -9,6 +9,7 @@ pub enum Status {
     WillRunOut,
     Tight,
     OnTrack,
+    Disabled,
 }
 
 impl Status {
@@ -18,6 +19,7 @@ impl Status {
             Status::WillRunOut => "❌ will run out",
             Status::Tight => "⚠  tight",
             Status::OnTrack => "✅ on track",
+            Status::Disabled => "🚫 disabled",
         }
     }
 
@@ -53,6 +55,7 @@ impl Status {
                     self.label().to_string()
                 }
             }
+            Status::Disabled => "🚫 disabled".to_string(),
             s => s.label().to_string(),
         }
     }
@@ -61,7 +64,7 @@ impl Status {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Prognosis {
     pub remaining_now: f64,
-    pub reset_time: DateTime<Utc>,
+    pub reset_time: Option<DateTime<Utc>>,
     pub last_sample: DateTime<Utc>,
     pub budget_now: Option<f64>,
     pub rate_per_h: Option<f64>,
@@ -95,9 +98,16 @@ pub fn window_boundaries(samples: &[Sample]) -> Vec<usize> {
         let prev = &samples[i - 1];
         let curr = &samples[i];
         let quota_increased = curr.remaining > prev.remaining + 0.005;
-        let reset_moved = curr.reset_time > prev.reset_time + Duration::seconds(60);
-        let reset_expired = prev.reset_time <= curr.ts;
-        if quota_increased || (reset_moved && reset_expired) {
+        let reset_moved = match (curr.reset_time, prev.reset_time) {
+            (Some(c), Some(p)) => c > p + Duration::seconds(60),
+            _ => false,
+        };
+        let reset_expired = match prev.reset_time {
+            Some(p) => p <= curr.ts,
+            None => false,
+        };
+        let disabled_changed = prev.disabled != curr.disabled;
+        if quota_increased || (reset_moved && reset_expired) || disabled_changed {
             boundaries.push(i);
         }
     }
@@ -108,7 +118,40 @@ pub fn prognose(current: &[Sample], tight: f64) -> Prognosis {
     let last = current.last().expect("current samples must not be empty");
     let t0 = last.ts;
     let r0 = last.remaining;
-    let end = last.reset_time;
+    if last.disabled {
+        return Prognosis {
+            remaining_now: r0,
+            reset_time: last.reset_time,
+            last_sample: t0,
+            budget_now: None,
+            rate_per_h: None,
+            safe_rate_per_h: None,
+            at_reset: None,
+            empty_at: None,
+            status: Status::Disabled,
+        };
+    }
+
+    let end = match last.reset_time {
+        Some(rt) => rt,
+        None => {
+            return Prognosis {
+                remaining_now: r0,
+                reset_time: None,
+                last_sample: t0,
+                budget_now: None,
+                rate_per_h: None,
+                safe_rate_per_h: None,
+                at_reset: None,
+                empty_at: None,
+                status: if last.disabled {
+                    Status::Disabled
+                } else {
+                    Status::Collecting
+                },
+            };
+        }
+    };
     let l_dur = window_length(&last.window);
     let lb_dur = lookback(&last.window);
 
@@ -116,7 +159,7 @@ pub fn prognose(current: &[Sample], tight: f64) -> Prognosis {
     if hours_left <= 0.0 {
         return Prognosis {
             remaining_now: r0,
-            reset_time: end,
+            reset_time: Some(end),
             last_sample: t0,
             budget_now: None,
             rate_per_h: None,
@@ -153,7 +196,7 @@ pub fn prognose(current: &[Sample], tight: f64) -> Prognosis {
         };
         return Prognosis {
             remaining_now: r0,
-            reset_time: end,
+            reset_time: Some(end),
             last_sample: t0,
             budget_now,
             rate_per_h: None,
@@ -236,7 +279,7 @@ pub fn prognose(current: &[Sample], tight: f64) -> Prognosis {
 
     Prognosis {
         remaining_now: r0,
-        reset_time: end,
+        reset_time: Some(end),
         last_sample: t0,
         budget_now,
         rate_per_h,
@@ -290,8 +333,26 @@ pub fn analyze(samples: &[Sample], tight: f64) -> Vec<BucketReport> {
         let last_boundary = boundary_indices.last().copied().unwrap_or(0);
         let candidate = &history[last_boundary..];
         let last = history.last().unwrap();
+
+        // Detect if a 5h bucket was skipped in collection because weekly limit was reached.
+        let is_orphaned_by_weekly_limit =
+            if last.window == "5h" && !last.disabled && last.ts < latest_ts {
+                samples.iter().any(|s| {
+                    s.group == group
+                        && s.window == "weekly"
+                        && s.ts == latest_ts
+                        && s.remaining <= 0.005
+                })
+            } else {
+                false
+            };
+
         let l_dur = window_length(&last.window);
-        let window_start = l_dur.map(|dur| last.reset_time - dur);
+        let window_start = if last.disabled || is_orphaned_by_weekly_limit {
+            None
+        } else {
+            last.reset_time.and_then(|rt| l_dur.map(|dur| rt - dur))
+        };
 
         let mut current: Vec<Sample> = if let Some(ws) = window_start {
             candidate.iter().filter(|s| s.ts >= ws).cloned().collect()
@@ -302,7 +363,15 @@ pub fn analyze(samples: &[Sample], tight: f64) -> Vec<BucketReport> {
             current.push(last.clone());
         }
 
-        let prognosis = prognose(&current, tight);
+        let prognosis = if is_orphaned_by_weekly_limit {
+            let mut orphaned_last = last.clone();
+            orphaned_last.disabled = true;
+            orphaned_last.ts = latest_ts;
+            orphaned_last.reset_time = None;
+            prognose(&[orphaned_last], tight)
+        } else {
+            prognose(&current, tight)
+        };
 
         reports.push(BucketReport {
             group,
@@ -358,7 +427,7 @@ mod tests {
 
     fn s(min_offset: i64, remaining: f64, reset: Option<DateTime<Utc>>) -> Sample {
         let ts = base_time() + Duration::minutes(min_offset);
-        let reset_time = reset.unwrap_or_else(|| base_time() + Duration::hours(5));
+        let reset_time = reset.or_else(|| Some(base_time() + Duration::hours(5)));
         Sample {
             ts,
             group: "Gemini Models".to_string(),
@@ -366,6 +435,7 @@ mod tests {
             window: "5h".to_string(),
             remaining,
             reset_time,
+            disabled: false,
         }
     }
 
@@ -415,6 +485,98 @@ mod tests {
         let p_tight = prognose(&samples_tight, 0.10);
         assert!((p_tight.at_reset.unwrap() - 0.099).abs() < 1e-4);
         assert_eq!(p_tight.status, Status::Tight);
+    }
+
+    #[test]
+    fn disabled_bucket_prognosis() {
+        let sample = Sample {
+            ts: base_time(),
+            group: "Claude and GPT models".to_string(),
+            bucket_id: "3p-5h".to_string(),
+            window: "5h".to_string(),
+            remaining: 1.0,
+            reset_time: None,
+            disabled: true,
+        };
+        let p = prognose(&[sample], 0.10);
+        assert_eq!(p.status, Status::Disabled);
+        assert_eq!(p.status.label(), "🚫 disabled");
+        assert_eq!(p.budget_now, None);
+        assert_eq!(p.rate_per_h, None);
+        assert_eq!(p.safe_rate_per_h, None);
+        assert_eq!(p.at_reset, None);
+        assert_eq!(p.empty_at, None);
+        assert_eq!(p.reset_time, None);
+    }
+
+    #[test]
+    fn analyze_explicit_disabled_bucket() {
+        let t1 = base_time();
+        let reset_w = t1 + Duration::days(4);
+        let samples = vec![
+            Sample {
+                ts: t1,
+                group: "Claude and GPT models".to_string(),
+                bucket_id: "3p-weekly".to_string(),
+                window: "weekly".to_string(),
+                remaining: 0.0,
+                reset_time: Some(reset_w),
+                disabled: false,
+            },
+            Sample {
+                ts: t1,
+                group: "Claude and GPT models".to_string(),
+                bucket_id: "3p-5h".to_string(),
+                window: "5h".to_string(),
+                remaining: 1.0,
+                reset_time: None,
+                disabled: true,
+            },
+        ];
+        let reports = analyze(&samples, 0.10);
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].bucket_id, "3p-weekly");
+        assert_eq!(reports[0].prognosis.status, Status::WillRunOut);
+
+        assert_eq!(reports[1].bucket_id, "3p-5h");
+        assert_eq!(reports[1].prognosis.status, Status::Disabled);
+        assert_eq!(reports[1].window_start, None);
+        assert_eq!(reports[1].prognosis.reset_time, None);
+    }
+
+    #[test]
+    fn analyze_orphaned_5h_when_weekly_limit_exhausted() {
+        let t_old = base_time() - Duration::hours(8);
+        let t_latest = base_time();
+        let reset_w = t_latest + Duration::days(4);
+        let reset_5h_old = t_old + Duration::hours(5);
+
+        let samples = vec![
+            Sample {
+                ts: t_old,
+                group: "Claude and GPT models".to_string(),
+                bucket_id: "3p-5h".to_string(),
+                window: "5h".to_string(),
+                remaining: 0.83,
+                reset_time: Some(reset_5h_old),
+                disabled: false,
+            },
+            Sample {
+                ts: t_latest,
+                group: "Claude and GPT models".to_string(),
+                bucket_id: "3p-weekly".to_string(),
+                window: "weekly".to_string(),
+                remaining: 0.0,
+                reset_time: Some(reset_w),
+                disabled: false,
+            },
+        ];
+        let reports = analyze(&samples, 0.10);
+        assert_eq!(reports.len(), 2);
+        let rep_5h = reports.iter().find(|r| r.bucket_id == "3p-5h").unwrap();
+        assert_eq!(rep_5h.prognosis.status, Status::Disabled);
+        assert_eq!(rep_5h.window_start, None);
+        assert_eq!(rep_5h.prognosis.last_sample, t_latest);
     }
 
     #[test]
@@ -511,7 +673,8 @@ mod tests {
                 bucket_id: "gemini-5h".to_string(),
                 window: "5h".to_string(),
                 remaining: 1.0,
-                reset_time: reset,
+                reset_time: Some(reset),
+                disabled: false,
             });
         }
         let reset_1700 = base_time() + Duration::hours(5);
@@ -530,7 +693,8 @@ mod tests {
                 bucket_id: "gemini-5h".to_string(),
                 window: "5h".to_string(),
                 remaining: rem,
-                reset_time: reset_1700,
+                reset_time: Some(reset_1700),
+                disabled: false,
             });
         }
 
@@ -554,7 +718,8 @@ mod tests {
             bucket_id: "gemini-5h".to_string(),
             window: "5h".to_string(),
             remaining: 0.50,
-            reset_time: reset_1700,
+            reset_time: Some(reset_1700),
+            disabled: false,
         }];
         let p = prognose(&samples, 0.10);
         assert_eq!(p.status, Status::Collecting);
@@ -575,7 +740,8 @@ mod tests {
                 bucket_id: "custom-daily".to_string(),
                 window: "daily".to_string(),
                 remaining: 0.8,
-                reset_time: reset,
+                reset_time: Some(reset),
+                disabled: false,
             },
             Sample {
                 ts: ts2,
@@ -583,7 +749,8 @@ mod tests {
                 bucket_id: "custom-daily".to_string(),
                 window: "daily".to_string(),
                 remaining: 0.6,
-                reset_time: reset,
+                reset_time: Some(reset),
+                disabled: false,
             },
         ];
         let reports = analyze(&samples, 0.10);
@@ -605,7 +772,8 @@ mod tests {
             bucket_id: id.to_string(),
             window: win.to_string(),
             remaining: rem,
-            reset_time: r_time,
+            reset_time: Some(r_time),
+            disabled: false,
         };
 
         let samples = vec![
@@ -726,7 +894,7 @@ mod tests {
         // Via Prognosis::status_label
         let p = Prognosis {
             remaining_now: 0.5,
-            reset_time: now + Duration::hours(10),
+            reset_time: Some(now + Duration::hours(10)),
             last_sample: now,
             budget_now: None,
             rate_per_h: None,

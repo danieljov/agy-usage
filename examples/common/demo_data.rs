@@ -31,7 +31,8 @@ pub fn generate_synthetic_samples(now: DateTime<Utc>) -> Vec<Sample> {
             bucket_id: "gemini-weekly".into(),
             window: "weekly".into(),
             remaining: gemini_weekly_rem,
-            reset_time: reset_gemini_weekly,
+            reset_time: Some(reset_gemini_weekly),
+            disabled: false,
         });
 
         // 2. Gemini 5h: starts at 100%, steady moderate usage down to 90.4%
@@ -42,7 +43,8 @@ pub fn generate_synthetic_samples(now: DateTime<Utc>) -> Vec<Sample> {
             bucket_id: "gemini-5h".into(),
             window: "5h".into(),
             remaining: gemini_5h_rem,
-            reset_time: reset_gemini_5h,
+            reset_time: Some(reset_gemini_5h),
+            disabled: false,
         });
 
         // 3. Claude/GPT Weekly: starts at 100%, slow burn down to 98.0%
@@ -53,7 +55,8 @@ pub fn generate_synthetic_samples(now: DateTime<Utc>) -> Vec<Sample> {
             bucket_id: "3p-weekly".into(),
             window: "weekly".into(),
             remaining: p3_weekly_rem,
-            reset_time: reset_3p_weekly,
+            reset_time: Some(reset_3p_weekly),
+            disabled: false,
         });
 
         // 4. Claude/GPT 5h: starts at 100%, rapid burn over last 1.5h down to 42.4%
@@ -68,7 +71,8 @@ pub fn generate_synthetic_samples(now: DateTime<Utc>) -> Vec<Sample> {
             bucket_id: "3p-5h".into(),
             window: "5h".into(),
             remaining: p3_5h_rem.max(0.05),
-            reset_time: reset_3p_5h,
+            reset_time: Some(reset_3p_5h),
+            disabled: false,
         });
     }
 

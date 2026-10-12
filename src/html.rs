@@ -15,7 +15,7 @@ struct CompactReport<'a> {
     bucket_id: &'a str,
     window: &'a str,
     window_start: Option<DateTime<Utc>>,
-    reset_time: DateTime<Utc>,
+    reset_time: Option<DateTime<Utc>>,
     boundaries: &'a [DateTime<Utc>],
     prognosis: &'a Prognosis,
     series: Vec<(i64, f64)>,
@@ -98,7 +98,7 @@ mod tests {
             boundaries: vec![],
             prognosis: Prognosis {
                 remaining_now: 0.75,
-                reset_time: reset,
+                reset_time: Some(reset),
                 last_sample: t0,
                 budget_now: Some(0.8),
                 rate_per_h: Some(0.05),
@@ -119,7 +119,8 @@ mod tests {
             bucket_id: "3p-5h".to_string(),
             window: "5h".to_string(),
             remaining: 0.8,
-            reset_time: now + Duration::hours(5),
+            reset_time: Some(now + Duration::hours(5)),
+            disabled: false,
         };
         let rep = make_report("3p Models", "3p-5h", "5h", vec![s]);
         let output = render(&[rep], now, 30, ClockFormat::H24);
@@ -137,7 +138,8 @@ mod tests {
             bucket_id: "gemini-weekly".to_string(),
             window: "weekly".to_string(),
             remaining: 0.9,
-            reset_time: now - Duration::days(33),
+            reset_time: Some(now - Duration::days(33)),
+            disabled: false,
         };
         let recent_sample = Sample {
             ts: now - Duration::days(1),
@@ -145,7 +147,8 @@ mod tests {
             bucket_id: "gemini-weekly".to_string(),
             window: "weekly".to_string(),
             remaining: 0.85,
-            reset_time: now + Duration::days(6),
+            reset_time: Some(now + Duration::days(6)),
+            disabled: false,
         };
         let rep = make_report(
             "Gemini",
@@ -168,7 +171,8 @@ mod tests {
             bucket_id: "gemini-weekly".to_string(),
             window: "weekly".to_string(),
             remaining: 0.85,
-            reset_time: now + Duration::days(6),
+            reset_time: Some(now + Duration::days(6)),
+            disabled: false,
         };
         let rep = make_report("Gemini", "gemini-weekly", "weekly", vec![s]);
         let output = render(&[rep], now, u32::MAX, ClockFormat::H24);
@@ -184,7 +188,8 @@ mod tests {
             bucket_id: "b1".to_string(),
             window: "5h".to_string(),
             remaining: 0.8,
-            reset_time: now + Duration::hours(5),
+            reset_time: Some(now + Duration::hours(5)),
+            disabled: false,
         };
         let rep = make_report("x</script><b>", "b1", "5h", vec![s]);
         let output = render(&[rep], now, 30, ClockFormat::H24);
@@ -292,7 +297,8 @@ mod tests {
             bucket_id: "b1".to_string(),
             window: "weekly".to_string(),
             remaining: 0.9,
-            reset_time: Utc.with_ymd_and_hms(2026, 10, 16, 12, 0, 0).unwrap(),
+            reset_time: Some(Utc.with_ymd_and_hms(2026, 10, 16, 12, 0, 0).unwrap()),
+            disabled: false,
         };
         let rep = make_report("/*__CHART_JS__*/", "b1", "weekly", vec![s]);
         let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
@@ -301,6 +307,29 @@ mod tests {
         let first_idx = html.find(CHART_JS).expect("CHART_JS should be present");
         let second_idx = html[first_idx + CHART_JS.len()..].find(CHART_JS);
         assert!(second_idx.is_none(), "CHART_JS was expanded multiple times");
+    }
+
+    #[test]
+    fn renders_disabled_bucket() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
+        let s = Sample {
+            ts: now,
+            group: "Claude and GPT models".to_string(),
+            bucket_id: "3p-5h".to_string(),
+            window: "5h".to_string(),
+            remaining: 1.0,
+            reset_time: None,
+            disabled: true,
+        };
+        let mut rep = make_report("Claude and GPT models", "3p-5h", "5h", vec![s]);
+        rep.prognosis.status = Status::Disabled;
+        rep.prognosis.reset_time = None;
+        rep.window_start = None;
+
+        let output = render(&[rep], now, 30, ClockFormat::H24);
+        assert!(output.contains("\"status\":\"Disabled\""));
+        assert!(output.contains("Weekly limit reached"));
+        assert!(output.contains("badge-disabled"));
     }
 
     #[test]
