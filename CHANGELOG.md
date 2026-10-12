@@ -18,8 +18,10 @@ Initial release of `agy-usage`: quota history, burn-rate prognosis, and interact
   - Interactive HTML dashboard featuring time-series charts, budget reference lines, and burn-rate projections.
   - Vendored Chart.js and date-fns adapter assets for 100% offline functionality with zero external CDN calls.
   - Browser auto-opening support (`--open`) and customizable output paths (`--out`).
-- **Automated Background Collection (`agy-usage install-timer`)**:
-  - One-command systemd user timer installation (`agy-usage.timer` and `agy-usage.service`) sampling quota every 5 minutes.
+- **Automated Background Collection (`agy-usage collect`, `install-timer`, `uninstall-timer`)**:
+  - Direct quota sampling via `agy-usage collect` with automatic HTML dashboard regeneration (unless `--no-html` is specified).
+  - One-command systemd user timer installation (`agy-usage install-timer`) creating `agy-usage.timer` and `agy-usage.service` to sample quota every 5 minutes.
+  - Complete removal of timers and services via `agy-usage uninstall-timer`.
   - Atomic lazy pruning for data retention (`--retention-days`, default 90 days) with sidecar file locking (`samples.lock`) preventing race conditions during concurrent appends.
   - Automatic propagation of CLI threshold, retention, and clock settings into systemd unit files.
 - **Prognosis & Burn-Rate Engine**:
@@ -31,3 +33,5 @@ Initial release of `agy-usage`: quota history, burn-rate prognosis, and interact
 - **Documentation & Visual Previews**:
   - Embedded demo screenshots in `README.md`.
   - Reproducible screenshot generator example (`examples/generate_screenshots.rs`) supporting headless Chrome/Chromium capture with vector-rendered borders.
+
+[0.1.0]: https://github.com/danieljov/agy-usage/releases/tag/v0.1.0

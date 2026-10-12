@@ -11,8 +11,12 @@ keywords = ["antigravity", "quota", "tui", "dashboard", "cli"]
 categories = ["command-line-utilities"]
 exclude = [
     ".github/",
-    "docs/superpowers/",
+    "docs/",
+    "assets/screenshots/",
 ]
+
+[profile.release]
+strip = true
 
 [dependencies]
 anyhow = "1"

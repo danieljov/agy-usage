@@ -23,6 +23,9 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Run test suite
+        run: cargo test --release --locked
+
       - name: Build release binary
         run: cargo build --release --locked
 
