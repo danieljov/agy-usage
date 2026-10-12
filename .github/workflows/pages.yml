@@ -1,0 +1,65 @@
+name: Pages
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+# Least privilege by default; the deploy job is granted the Pages write and
+# OIDC token permissions required by actions/deploy-pages.
+permissions:
+  contents: read
+
+# Allow only one concurrent deployment; let an in-progress deployment finish
+# instead of cancelling it midway, but skip runs queued in between.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build demo dashboard
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Generate demo dashboard
+        run: cargo run --locked --example generate_demo -- _site
+
+      - name: Verify generated site
+        run: |
+          test -s _site/index.html
+          grep -q "gemini-weekly" _site/index.html
+          if grep -q "/\*__AGY_DATA__\*/null" _site/index.html; then
+            echo "::error::Dashboard data placeholder was not replaced"
+            exit 1
+          fi
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

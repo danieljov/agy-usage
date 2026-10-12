@@ -5,7 +5,7 @@ edition = "2024"
 license = "MIT"
 description = "Quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Google Antigravity"
 repository = "https://github.com/danieljov/agy-usage"
-homepage = "https://github.com/danieljov/agy-usage"
+homepage = "https://danieljov.github.io/agy-usage"
 readme = "README.md"
 keywords = ["antigravity", "quota", "tui", "dashboard", "cli"]
 categories = ["command-line-utilities"]
@@ -35,3 +35,9 @@ unicode-width = "0.2"
 [[bin]]
 name = "agy-usage"
 path = "src/main.rs"
+
+# Run the demo generator's unit tests as part of `cargo test` so the
+# GitHub Pages build input is verified in CI.
+[[example]]
+name = "generate_demo"
+test = true
