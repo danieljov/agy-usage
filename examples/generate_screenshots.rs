@@ -23,10 +23,8 @@ use ratatui::style::{Color, Modifier};
 use unicode_width::UnicodeWidthStr;
 
 fn resolve_chrome_bin() -> anyhow::Result<String> {
-    if let Ok(bin) = std::env::var("CHROME_BIN") {
-        if !bin.is_empty() {
-            return Ok(bin);
-        }
+    if let Some(bin) = std::env::var("CHROME_BIN").ok().filter(|b| !b.is_empty()) {
+        return Ok(bin);
     }
     let candidates = [
         "google-chrome",
@@ -498,7 +496,9 @@ fn main() -> anyhow::Result<()> {
     println!("Captured {}", tui_png.display());
 
     // Clean up temporary HTML files unless KEEP_TEMP=1 is set
-    let keep_temp = std::env::var("KEEP_TEMP").map(|v| v == "1").unwrap_or(false);
+    let keep_temp = std::env::var("KEEP_TEMP")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     if !keep_temp {
         let _ = std::fs::remove_file(&dashboard_html_path);
         let _ = std::fs::remove_file(&tui_html_path);
