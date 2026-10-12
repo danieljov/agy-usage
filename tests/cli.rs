@@ -367,7 +367,8 @@ fn cli_lazy_pruning_on_collect() {
         bucket_id: "old_bucket".to_string(),
         window: "5h".to_string(),
         remaining: 0.5,
-        reset_time: old_ts + chrono::Duration::hours(5),
+        reset_time: Some(old_ts + chrono::Duration::hours(5)),
+        disabled: false,
     };
     agy_usage::store::append(&samples_file, std::slice::from_ref(&old_sample)).unwrap();
 

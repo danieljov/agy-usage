@@ -148,7 +148,18 @@ fn draw_chart(frame: &mut Frame, rep: &BucketReport, area: Rect, index: Option<u
         return;
     }
 
-    let title = if let Some(idx) = index {
+    let title = if rep.prognosis.status == Status::Disabled {
+        if let Some(idx) = index {
+            format!(
+                "[{}] {} · {}  disabled",
+                idx + 1,
+                rep.group,
+                format_window(&rep.window),
+            )
+        } else {
+            format!("{} · {}  disabled", rep.group, format_window(&rep.window),)
+        }
+    } else if let Some(idx) = index {
         format!(
             "[{}] {} · {}  {:.0}% left",
             idx + 1,
@@ -165,6 +176,29 @@ fn draw_chart(frame: &mut Frame, rep: &BucketReport, area: Rect, index: Option<u
         )
     };
 
+    if rep.prognosis.status == Status::Disabled {
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let pad_top = if inner_height > 2 {
+            (inner_height - 1) / 2
+        } else {
+            0
+        };
+        let mut msg = "\n".repeat(pad_top);
+        msg.push_str("Disabled (weekly limit reached)");
+
+        let text = Paragraph::new(msg)
+            .alignment(ratatui::layout::Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray))
+            .block(Block::default().borders(Borders::ALL).title(title));
+        frame.render_widget(text, area);
+        return;
+    }
+
+    let reset_time = match rep.prognosis.reset_time {
+        Some(rt) => rt,
+        None => return,
+    };
+
     let actual_pts: Vec<(f64, f64)> = rep
         .current
         .iter()
@@ -174,7 +208,7 @@ fn draw_chart(frame: &mut Frame, rep: &BucketReport, area: Rect, index: Option<u
     let budget_pts: Vec<(f64, f64)> = if let Some(ws) = rep.window_start {
         vec![
             (ws.timestamp() as f64, 100.0),
-            (rep.prognosis.reset_time.timestamp() as f64, 0.0),
+            (reset_time.timestamp() as f64, 0.0),
         ]
     } else {
         Vec::new()
@@ -184,11 +218,7 @@ fn draw_chart(frame: &mut Frame, rep: &BucketReport, area: Rect, index: Option<u
     if let Some(_rate) = rep.prognosis.rate_per_h.filter(|&r| r > 0.0) {
         let start_x = rep.prognosis.last_sample.timestamp() as f64;
         let start_y = rep.prognosis.remaining_now * 100.0;
-        let end_x = rep
-            .prognosis
-            .empty_at
-            .unwrap_or(rep.prognosis.reset_time)
-            .timestamp() as f64;
+        let end_x = rep.prognosis.empty_at.unwrap_or(reset_time).timestamp() as f64;
         let end_y = if rep.prognosis.empty_at.is_some() {
             0.0
         } else {
@@ -204,8 +234,8 @@ fn draw_chart(frame: &mut Frame, rep: &BucketReport, area: Rect, index: Option<u
     }
 
     let reset_pts = vec![
-        (rep.prognosis.reset_time.timestamp() as f64, 0.0),
-        (rep.prognosis.reset_time.timestamp() as f64, 100.0),
+        (reset_time.timestamp() as f64, 0.0),
+        (reset_time.timestamp() as f64, 100.0),
     ];
 
     let mut x_min = rep
@@ -217,7 +247,7 @@ fn draw_chart(frame: &mut Frame, rep: &BucketReport, area: Rect, index: Option<u
                 .map(|s| s.ts.timestamp() as f64)
                 .unwrap_or(0.0)
         });
-    let mut x_max = rep.prognosis.reset_time.timestamp() as f64;
+    let mut x_max = reset_time.timestamp() as f64;
     if x_min >= x_max {
         x_min = x_max - 3600.0;
         x_max += 1.0;
@@ -316,7 +346,11 @@ fn draw_table(
         .map(|(i, rep)| {
             let idx = focus_idx.unwrap_or(i);
             let p = &rep.prognosis;
-            let left_str = format!("{:.1}%", p.remaining_now * 100.0);
+            let left_str = if p.status == Status::Disabled {
+                "—".into()
+            } else {
+                format!("{:.1}%", p.remaining_now * 100.0)
+            };
             let rate_str = p
                 .rate_per_h
                 .map(|r| format!("{:.2}%", r * 100.0))
@@ -930,6 +964,43 @@ mod tests {
     }
 
     #[test]
+    fn disabled_bucket_chart_and_focus_rendering() {
+        let mut reports = make_test_reports();
+        reports[1].prognosis.status = Status::Disabled;
+        reports[1].prognosis.reset_time = None;
+
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
+
+        // 1. In grid view:
+        let text_grid = render_plain(&reports, now, 80, 24, ClockFormat::H24);
+        assert!(text_grid.contains("Gemini Models · 5h  disabled"));
+        assert!(text_grid.contains("Disabled (weekly limit reached)"));
+        assert!(text_grid.contains("🚫 disabled"));
+
+        // 2. In focus view on the disabled bucket:
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = ViewState {
+            focus: Some(1),
+            message: None,
+            is_once: false,
+            ..Default::default()
+        };
+        terminal.draw(|f| draw(f, &reports, &state, now)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut text_focus = String::new();
+        for y in 0..24 {
+            for x in 0..80 {
+                text_focus.push_str(buffer[(x, y)].symbol());
+            }
+            text_focus.push('\n');
+        }
+        assert!(text_focus.contains("Gemini Models · 5h  disabled"));
+        assert!(text_focus.contains("Disabled (weekly limit reached)"));
+    }
+
+    #[test]
     fn render_plain_text() {
         let reports = make_test_reports();
         let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
@@ -1183,7 +1254,8 @@ mod tests {
             bucket_id: "b1".to_string(),
             window: "5h".to_string(),
             remaining: 0.9,
-            reset_time: Utc.with_ymd_and_hms(2026, 10, 11, 17, 0, 0).unwrap(),
+            reset_time: Some(Utc.with_ymd_and_hms(2026, 10, 11, 17, 0, 0).unwrap()),
+            disabled: false,
         };
         crate::store::append(&path, std::slice::from_ref(&s1)).unwrap();
 
@@ -1203,7 +1275,8 @@ mod tests {
             bucket_id: "b1".to_string(),
             window: "5h".to_string(),
             remaining: 0.85,
-            reset_time: Utc.with_ymd_and_hms(2026, 10, 11, 17, 0, 0).unwrap(),
+            reset_time: Some(Utc.with_ymd_and_hms(2026, 10, 11, 17, 0, 0).unwrap()),
+            disabled: false,
         };
         crate::store::append(&path, std::slice::from_ref(&s2)).unwrap();
 
@@ -1231,6 +1304,7 @@ mod tests {
             Status::Tight,
             Status::WillRunOut,
             Status::Collecting,
+            Status::Disabled,
         ];
         let reports: Vec<BucketReport> = statuses
             .into_iter()
@@ -1285,6 +1359,7 @@ mod tests {
         assert!(rendered_lines[3].contains("⚠  tight"));
         assert!(rendered_lines[4].contains("❌ in 2h"));
         assert!(rendered_lines[5].contains("⏳ collecting"));
+        assert!(rendered_lines[6].contains("🚫 disabled"));
 
         // 3. Inspect the status cells directly for Tight at y=3:
         // Column 57 has '⚠', which must have display width 1 (not wide 2),

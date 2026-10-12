@@ -103,6 +103,10 @@
             background: rgba(56, 189, 248, 0.15);
             color: var(--accent);
         }
+        .badge.badge-disabled {
+            background: rgba(148, 163, 184, 0.15);
+            color: var(--text-dim);
+        }
         .chart-box {
             position: relative;
             height: 260px;
@@ -197,6 +201,7 @@
                 }
                 return '❌ will run out';
             }
+            if (status === 'Disabled') return '🚫 disabled';
             switch (status) {
                 case 'Collecting': return '⏳ collecting';
                 case 'Tight': return '⚠️ tight';
@@ -280,13 +285,14 @@
 
             data.reports.forEach((rep, idx) => {
                 const p = rep.prognosis;
+                const isDis = p.status === 'Disabled';
                 const winFormatted = formatWindow(rep.window);
                 const title = `${rep.group} · ${winFormatted}`;
 
-                const leftStr = `${(p.remaining_now * 100).toFixed(1)}%`;
-                const rateStr = p.rate_per_h != null ? `${(p.rate_per_h * 100).toFixed(2)}%/h` : '—';
-                const safeStr = p.safe_rate_per_h != null ? `${(p.safe_rate_per_h * 100).toFixed(2)}%/h` : '—';
-                const atResetStr = p.at_reset != null ? `${(p.at_reset * 100).toFixed(1)}%` : '—';
+                const leftStr = isDis ? 'disabled' : `${(p.remaining_now * 100).toFixed(1)}%`;
+                const rateStr = (isDis || p.rate_per_h == null) ? '—' : `${(p.rate_per_h * 100).toFixed(2)}%/h`;
+                const safeStr = (isDis || p.safe_rate_per_h == null) ? '—' : `${(p.safe_rate_per_h * 100).toFixed(2)}%/h`;
+                const atResetStr = (isDis || p.at_reset == null) ? '—' : `${(p.at_reset * 100).toFixed(1)}%`;
                 const statusStr = statusLabel(p.status, p.empty_at, Date.now());
                 const lastDate = new Date(p.last_sample);
                 const lastSampleStr = `${lastDate.toLocaleTimeString(undefined, TIME_OPTS)} (${formatTimeAgo(lastDate)})`;
@@ -294,7 +300,7 @@
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
                     <td><strong>${escapeHtml(title)}</strong></td>
-                    <td>${leftStr}</td>
+                    <td>${escapeHtml(leftStr)}</td>
                     <td>${rateStr}</td>
                     <td>${safeStr}</td>
                     <td>${atResetStr}</td>
@@ -303,12 +309,15 @@
                 `;
                 tbody.appendChild(tr);
 
+                const badgeText = isDis ? 'disabled' : `${leftStr} left`;
+                const badgeClass = isDis ? 'badge badge-disabled' : 'badge';
+
                 const card = document.createElement('div');
                 card.className = 'chart-card';
                 card.innerHTML = `
                     <div class="chart-header">
                         <div class="chart-title">${escapeHtml(title)}</div>
-                        <span class="badge">${leftStr} left</span>
+                        <span class="${badgeClass}">${escapeHtml(badgeText)}</span>
                     </div>
                     <div class="chart-box">
                         <canvas class="bucket-chart" data-idx="${idx}"></canvas>
@@ -375,7 +384,18 @@
                     });
                 }
 
-                if (typeof Chart !== 'undefined') {
+                if (isDis) {
+                    const box = card.querySelector('.chart-box');
+                    box.style.display = 'flex';
+                    box.style.flexDirection = 'column';
+                    box.style.alignItems = 'center';
+                    box.style.justifyContent = 'center';
+                    box.style.color = 'var(--text-dim)';
+                    box.style.fontSize = '0.95rem';
+                    box.style.border = '1px dashed var(--border)';
+                    box.style.borderRadius = '6px';
+                    box.innerHTML = '<strong style="color:var(--text);font-size:1.05rem;margin-bottom:0.25rem;">Disabled</strong><span>Weekly limit reached</span>';
+                } else if (typeof Chart !== 'undefined') {
                     new Chart(canvas, {
                         type: 'line',
                         data: { datasets },

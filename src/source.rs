@@ -69,26 +69,51 @@ pub fn parse_usage(json: &str, ts: DateTime<Utc>) -> Result<Vec<Sample>> {
 
         if let Some(buckets) = group.get("buckets").and_then(Value::as_array) {
             for bucket in buckets {
-                let remaining = match bucket.get("remaining_fraction").and_then(Value::as_f64) {
-                    Some(r) if r.is_finite() => r.clamp(0.0, 1.0),
-                    _ => continue,
-                };
-
-                let reset_str = match bucket.get("reset_time").and_then(Value::as_str) {
-                    Some(s) => s,
-                    None => continue,
-                };
-
-                let reset_time = match DateTime::parse_from_rfc3339(reset_str) {
-                    Ok(dt) => dt.with_timezone(&Utc),
-                    Err(_) => continue,
-                };
-
                 let bucket_id = bucket.get("id").and_then(Value::as_str).unwrap_or_default();
                 let window = bucket
                     .get("window")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
+
+                let is_disabled = bucket
+                    .get("disabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+
+                let reset_time = bucket
+                    .get("reset_time")
+                    .and_then(Value::as_str)
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+
+                let remaining_opt = bucket
+                    .get("remaining_fraction")
+                    .and_then(Value::as_f64)
+                    .filter(|r| r.is_finite())
+                    .map(|r| r.clamp(0.0, 1.0));
+
+                if is_disabled {
+                    samples.push(Sample {
+                        ts,
+                        group: group_name.to_string(),
+                        bucket_id: bucket_id.to_string(),
+                        window: window.to_string(),
+                        remaining: remaining_opt.unwrap_or(0.0),
+                        reset_time,
+                        disabled: true,
+                    });
+                    continue;
+                }
+
+                let remaining = match remaining_opt {
+                    Some(r) => r,
+                    None => continue,
+                };
+
+                let reset_time = match reset_time {
+                    Some(rt) => rt,
+                    None => continue,
+                };
 
                 samples.push(Sample {
                     ts,
@@ -96,7 +121,8 @@ pub fn parse_usage(json: &str, ts: DateTime<Utc>) -> Result<Vec<Sample>> {
                     bucket_id: bucket_id.to_string(),
                     window: window.to_string(),
                     remaining,
-                    reset_time,
+                    reset_time: Some(reset_time),
+                    disabled: false,
                 });
             }
         }
@@ -276,14 +302,61 @@ mod tests {
         assert!((samples[0].remaining - 0.7730404734611511).abs() < 1e-6);
         assert_eq!(
             samples[0].reset_time,
-            Utc.with_ymd_and_hms(2026, 10, 16, 19, 18, 13).unwrap()
+            Some(Utc.with_ymd_and_hms(2026, 10, 16, 19, 18, 13).unwrap())
         );
         assert_eq!(samples[0].ts, ts);
+        assert!(!samples[0].disabled);
 
         assert_eq!(samples[3].bucket_id, "3p-5h");
+        assert!(!samples[3].disabled);
         for s in &samples {
             assert_eq!(s.ts, ts);
         }
+    }
+
+    #[test]
+    fn disabled_bucket_when_weekly_limit_reached() {
+        let ts = Utc.with_ymd_and_hms(2026, 10, 12, 13, 35, 0).unwrap();
+        let json = r#"{
+            "status": "SUCCESS",
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "Claude and GPT models",
+                            "buckets": [
+                                {
+                                    "id": "3p-weekly",
+                                    "name": "Weekly Limit Remaining",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0,
+                                    "reset_time": "2026-10-16T20:52:27Z"
+                                },
+                                {
+                                    "id": "3p-5h",
+                                    "name": "Five Hour Limit Remaining",
+                                    "description": "You have hit your weekly limit, the 5-hour limit does not currently apply.",
+                                    "window": "5h",
+                                    "disabled": true,
+                                    "remaining_fraction": 1
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }"#;
+        let samples = parse_usage(json, ts).unwrap();
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].bucket_id, "3p-weekly");
+        assert!(!samples[0].disabled);
+        assert_eq!(samples[0].remaining, 0.0);
+
+        assert_eq!(samples[1].bucket_id, "3p-5h");
+        assert!(samples[1].disabled);
+        assert_eq!(samples[1].reset_time, None);
+        assert_eq!(samples[1].remaining, 1.0);
     }
 
     #[test]

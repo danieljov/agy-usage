@@ -291,7 +291,8 @@ mod tests {
             bucket_id: id.to_string(),
             window: "weekly".to_string(),
             remaining,
-            reset_time: Utc.with_ymd_and_hms(2026, 10, 16, 12, 0, 0).unwrap(),
+            reset_time: Some(Utc.with_ymd_and_hms(2026, 10, 16, 12, 0, 0).unwrap()),
+            disabled: false,
         }
     }
 
