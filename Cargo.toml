@@ -3,6 +3,16 @@ name = "agy-usage"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+description = "Quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Google Antigravity"
+repository = "https://github.com/danieljov/agy-usage"
+homepage = "https://github.com/danieljov/agy-usage"
+readme = "README.md"
+keywords = ["antigravity", "quota", "tui", "dashboard", "cli"]
+categories = ["command-line-utilities"]
+exclude = [
+    ".github/",
+    "docs/superpowers/",
+]
 
 [dependencies]
 anyhow = "1"
