@@ -3,6 +3,10 @@ name: Pages
 on:
   push:
     branches: ["main"]
+  schedule:
+    # Rebuild periodically (every 6 hours) so the synthetic demo's relative
+    # timestamps and burn-rate prognoses stay fresh between code pushes.
+    - cron: '17 */6 * * *'
   workflow_dispatch:
 
 # Least privilege by default; the deploy job is granted the Pages write and
@@ -31,6 +35,9 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Test demo generator
+        run: cargo test --locked --example generate_demo
+
       - name: Generate demo dashboard
         run: cargo run --locked --example generate_demo -- _site
 
@@ -38,8 +45,17 @@ jobs:
         run: |
           test -s _site/index.html
           grep -q "gemini-weekly" _site/index.html
+          grep -q "Live demo" _site/index.html
           if grep -q "/\*__AGY_DATA__\*/null" _site/index.html; then
             echo "::error::Dashboard data placeholder was not replaced"
+            exit 1
+          fi
+          if grep -q "/\*__CHART_JS__\*/" _site/index.html; then
+            echo "::error::Chart.js placeholder was not replaced"
+            exit 1
+          fi
+          if grep -q "/\*__DATE_FNS_ADAPTER__\*/" _site/index.html; then
+            echo "::error::date-fns adapter placeholder was not replaced"
             exit 1
           fi
 

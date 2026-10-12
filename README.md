@@ -19,7 +19,7 @@ Quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Goog
 
 [![HTML Web Dashboard](https://raw.githubusercontent.com/danieljov/agy-usage/main/assets/screenshots/dashboard.png)](https://danieljov.github.io/agy-usage)
 
-The [live demo](https://danieljov.github.io/agy-usage) is regenerated from synthetic data on every push to `main` (`cargo run --example generate_demo`), so relative times reflect the last deployment.
+The [live demo](https://danieljov.github.io/agy-usage) is rendered from synthetic data and rebuilt every 6 hours (as well as on pushes to `main`) via GitHub Actions (`cargo run --example generate_demo`). Relative timestamps and exhaustion prognoses reflect the state at the last deployment.
 
 ## Installation
 

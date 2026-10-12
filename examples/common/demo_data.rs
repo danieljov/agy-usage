@@ -1,8 +1,9 @@
 //! Shared synthetic quota dataset used by the demo examples
 //! (`generate_screenshots` and `generate_demo`).
 //!
-//! Included via `#[path = "common/demo_data.rs"] mod demo_data;` so that Cargo
-//! does not auto-discover it as a standalone example.
+//! Placed in a subdirectory without a `main.rs` so Cargo does not auto-discover
+//! it as a standalone example binary, and included via
+//! `#[path = "common/demo_data.rs"] mod demo_data;`.
 
 use agy_usage::model::Sample;
 use chrono::{DateTime, Duration, Utc};
