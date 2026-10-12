@@ -4,6 +4,16 @@ Quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Goog
 
 `agy-usage` samples your Antigravity quota periodically (every 5 minutes via a systemd user timer), computes burn rates and quota window projections, and displays the status in both a `ratatui` terminal interface and a self-contained HTML dashboard.
 
+## Screenshots
+
+### Interactive Terminal Dashboard (`agy-usage show`)
+
+![Interactive Terminal TUI Dashboard](assets/screenshots/tui.png)
+
+### Self-Contained HTML Dashboard (`agy-usage html --open`)
+
+![HTML Web Dashboard](assets/screenshots/dashboard.png)
+
 ## Installation
 
 Ensure Rust 1.99+ is installed, then build and install locally:
