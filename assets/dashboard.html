@@ -289,7 +289,7 @@
                 const winFormatted = formatWindow(rep.window);
                 const title = `${rep.group} · ${winFormatted}`;
 
-                const leftStr = isDis ? 'disabled' : `${(p.remaining_now * 100).toFixed(1)}%`;
+                const leftStr = isDis ? '—' : `${(p.remaining_now * 100).toFixed(1)}%`;
                 const rateStr = (isDis || p.rate_per_h == null) ? '—' : `${(p.rate_per_h * 100).toFixed(2)}%/h`;
                 const safeStr = (isDis || p.safe_rate_per_h == null) ? '—' : `${(p.safe_rate_per_h * 100).toFixed(2)}%/h`;
                 const atResetStr = (isDis || p.at_reset == null) ? '—' : `${(p.at_reset * 100).toFixed(1)}%`;
