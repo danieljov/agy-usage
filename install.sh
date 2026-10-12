@@ -78,15 +78,17 @@ info "Downloading ${TARBALL}..."
 curl -fsSL -o "${TMP_DIR}/${TARBALL}" "${DOWNLOAD_URL}"
 
 info "Downloading SHA-256 checksum..."
-if curl -fsSL -o "${TMP_DIR}/${TARBALL}.sha256" "${CHECKSUM_URL}" 2>/dev/null; then
-    if command -v sha256sum >/dev/null 2>&1; then
-        info "Verifying SHA-256 checksum..."
-        (cd "${TMP_DIR}" && sha256sum -c "${TARBALL}.sha256" >/dev/null)
-    elif command -v shasum >/dev/null 2>&1; then
-        info "Verifying SHA-256 checksum..."
-        (cd "${TMP_DIR}" && shasum -a 256 -c "${TARBALL}.sha256" >/dev/null)
-    fi
+curl -fsSL -o "${TMP_DIR}/${TARBALL}.sha256" "${CHECKSUM_URL}" || error "Failed to download SHA-256 checksum from ${CHECKSUM_URL}"
+
+info "Verifying SHA-256 checksum..."
+if command -v sha256sum >/dev/null 2>&1; then
+    (cd "${TMP_DIR}" && sha256sum -c "${TARBALL}.sha256") >/dev/null 2>&1 || error "SHA-256 checksum verification failed for ${TARBALL}"
+elif command -v shasum >/dev/null 2>&1; then
+    (cd "${TMP_DIR}" && shasum -a 256 -c "${TARBALL}.sha256") >/dev/null 2>&1 || error "SHA-256 checksum verification failed for ${TARBALL}"
+else
+    error "Neither 'sha256sum' nor 'shasum' was found in PATH to verify package integrity"
 fi
+info "SHA-256 checksum verified successfully."
 
 # 6. Extract archive
 info "Extracting ${TARBALL}..."
