@@ -8,11 +8,11 @@ Quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Goog
 
 ### Interactive Terminal Dashboard (`agy-usage show`)
 
-![Interactive Terminal TUI Dashboard](assets/screenshots/tui.png)
+![Interactive Terminal TUI Dashboard](https://raw.githubusercontent.com/danieljov/agy-usage/main/assets/screenshots/tui.png)
 
 ### Self-Contained HTML Dashboard (`agy-usage html --open`)
 
-![HTML Web Dashboard](assets/screenshots/dashboard.png)
+![HTML Web Dashboard](https://raw.githubusercontent.com/danieljov/agy-usage/main/assets/screenshots/dashboard.png)
 
 ## Installation
 
