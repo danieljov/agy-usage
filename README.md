@@ -1,8 +1,13 @@
 # agy-usage
 
+[![CI](https://github.com/danieljov/agy-usage/actions/workflows/ci.yml/badge.svg)](https://github.com/danieljov/agy-usage/actions/workflows/ci.yml)
+[![Live Demo](https://img.shields.io/badge/demo-live-brightgreen?logo=github)](https://danieljov.github.io/agy-usage)
+
 Quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Google Antigravity.
 
 `agy-usage` samples your Antigravity quota periodically (every 5 minutes via a systemd user timer), computes burn rates and quota window projections, and displays the status in both a `ratatui` terminal interface and a self-contained HTML dashboard.
+
+**🔗 [Live Demo](https://danieljov.github.io/agy-usage)** — try the interactive HTML dashboard in your browser (synthetic data).
 
 ## Screenshots
 
@@ -12,7 +17,9 @@ Quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Goog
 
 ### Self-Contained HTML Dashboard (`agy-usage html --open`)
 
-![HTML Web Dashboard](https://raw.githubusercontent.com/danieljov/agy-usage/main/assets/screenshots/dashboard.png)
+[![HTML Web Dashboard](https://raw.githubusercontent.com/danieljov/agy-usage/main/assets/screenshots/dashboard.png)](https://danieljov.github.io/agy-usage)
+
+The [live demo](https://danieljov.github.io/agy-usage) is rendered from synthetic data and rebuilt every 6 hours (as well as on pushes to `main`) via GitHub Actions (`cargo run --example generate_demo`). Relative timestamps and exhaustion prognoses reflect the state at the last deployment.
 
 ## Installation
 

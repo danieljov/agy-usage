@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Live Demo on GitHub Pages**: interactive HTML dashboard rendered from the synthetic demo dataset, published at <https://danieljov.github.io/agy-usage> by the `Pages` workflow on pushes to `main` and scheduled every 6 hours.
+- Chrome-free demo generator example (`examples/generate_demo.rs`) writing `index.html`; the synthetic dataset is shared with `generate_screenshots` via `examples/common/demo_data.rs`.
+
+### Changed
+- Point package `homepage` in `Cargo.toml` to the live GitHub Pages demo.
+
 ## [0.1.0] - 2026-10-12
 
 Initial release of `agy-usage`: quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Google Antigravity.
