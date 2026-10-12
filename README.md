@@ -16,9 +16,41 @@ Quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Goog
 
 ## Installation
 
-Ensure Rust 1.99+ is installed, then build and install locally:
+### Pre-compiled Binary (Linux x86_64)
+
+Standalone binaries with zero external runtime dependencies are published on [GitHub Releases](https://github.com/danieljov/agy-usage/releases/latest).
+
+#### Using GitHub CLI (`gh`)
+```bash
+gh release download --repo danieljov/agy-usage --pattern "*.tar.gz"
+tar -xzf agy-usage-*.tar.gz
+mkdir -p ~/.local/bin
+mv agy-usage-*/agy-usage ~/.local/bin/
+rm -rf agy-usage-*
+```
+
+#### Using `curl`
+```bash
+# Download and extract the Linux x86_64 release tarball
+curl -sL https://github.com/danieljov/agy-usage/releases/latest/download/agy-usage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz | tar -xz
+
+# Move the binary to a directory in your PATH (e.g. ~/.local/bin)
+mkdir -p ~/.local/bin
+mv agy-usage-*/agy-usage ~/.local/bin/
+rm -rf agy-usage-*
+```
+
+Ensure `~/.local/bin` is in your `PATH` (e.g., `export PATH="$HOME/.local/bin:$PATH"` in `~/.bashrc` or `~/.zshrc`).
+
+### From Source (Cargo)
+
+Ensure Rust 1.99+ is installed:
 
 ```bash
+# From crates.io (once published)
+cargo install agy-usage
+
+# Or build and install directly from the local repository
 cargo install --path .
 ```
 
