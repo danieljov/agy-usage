@@ -16,7 +16,15 @@ Quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Goog
 
 ## Installation
 
-### Pre-compiled Binary (Linux x86_64)
+### Quick Install (Linux x86_64)
+
+Install the latest release binary into `~/.local/bin` with automated checksum verification:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/danieljov/agy-usage/main/install.sh | bash
+```
+
+### Manual Binary Download (Linux x86_64)
 
 Pre-compiled standalone binaries for Linux (`x86_64-unknown-linux-gnu`) are published on [GitHub Releases](https://github.com/danieljov/agy-usage/releases/latest).
 

@@ -33,7 +33,8 @@ Initial release of `agy-usage`: quota history, burn-rate prognosis, and interact
 - **Documentation & Visual Previews**:
   - Embedded demo screenshots in `README.md`.
   - Reproducible screenshot generator example (`examples/generate_screenshots.rs`) supporting headless Chrome/Chromium capture with vector-rendered borders.
-- **Pre-compiled Binary Releases**:
+- **Pre-compiled Binary Releases & Installer**:
   - Standalone, stripped Linux x86_64 binary archives with SHA-256 checksums published via automated GitHub Release workflow.
+  - Automated one-line curl installation script (`install.sh`) with automated SHA-256 checksum verification.
 
 [0.1.0]: https://github.com/danieljov/agy-usage/releases/tag/v0.1.0
