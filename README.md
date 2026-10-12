@@ -16,9 +16,54 @@ Quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Goog
 
 ## Installation
 
-Ensure Rust 1.99+ is installed, then build and install locally:
+### Quick Install (Linux x86_64)
+
+Install the latest release binary into `~/.local/bin` with automated checksum verification:
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/danieljov/agy-usage/main/install.sh | bash
+```
+
+### Manual Binary Download (Linux x86_64)
+
+Pre-compiled standalone binaries for Linux (`x86_64-unknown-linux-gnu`) are published on [GitHub Releases](https://github.com/danieljov/agy-usage/releases/latest).
+
+#### Using `curl`
+```bash
+TMP_DIR=$(mktemp -d)
+curl -fsSL https://github.com/danieljov/agy-usage/releases/download/v0.1.0/agy-usage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C "$TMP_DIR"
+mkdir -p ~/.local/bin
+mv "$TMP_DIR"/agy-usage-*/agy-usage ~/.local/bin/
+rm -rf "$TMP_DIR"
+```
+
+#### Using GitHub CLI (`gh`)
+```bash
+TMP_DIR=$(mktemp -d)
+gh release download --repo danieljov/agy-usage --pattern "*.tar.gz" --dir "$TMP_DIR"
+tar -xzf "$TMP_DIR"/*.tar.gz -C "$TMP_DIR"
+mkdir -p ~/.local/bin
+mv "$TMP_DIR"/agy-usage-*/agy-usage ~/.local/bin/
+rm -rf "$TMP_DIR"
+```
+
+Ensure `~/.local/bin` is in your `PATH` (e.g., `export PATH="$HOME/.local/bin:$PATH"` in `~/.bashrc` or `~/.zshrc`). Verify the installation:
+```bash
+agy-usage --help
+```
+
+### From Source (Cargo)
+
+Ensure Rust 1.99+ is installed:
+
+```bash
+# From git repository
+cargo install --git https://github.com/danieljov/agy-usage.git
+
+# From crates.io (once published)
+cargo install agy-usage
+
+# Or build and install from a local clone
 cargo install --path .
 ```
 

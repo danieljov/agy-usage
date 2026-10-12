@@ -13,6 +13,7 @@ exclude = [
     ".github/",
     "docs/",
     "assets/screenshots/",
+    "install.sh",
 ]
 
 [profile.release]
