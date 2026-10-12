@@ -18,7 +18,7 @@ Quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Goog
 
 ### Pre-compiled Binary (Linux x86_64)
 
-Standalone binaries with zero external runtime dependencies are published on [GitHub Releases](https://github.com/danieljov/agy-usage/releases/latest).
+Pre-compiled standalone binaries for Linux (`x86_64-unknown-linux-gnu`) are published on [GitHub Releases](https://github.com/danieljov/agy-usage/releases/latest).
 
 #### Using `curl`
 ```bash
