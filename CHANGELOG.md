@@ -7,12 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-13
+
 ### Added
 - **Live Demo on GitHub Pages**: interactive HTML dashboard rendered from the synthetic demo dataset, published at <https://danieljov.github.io/agy-usage> by the `Pages` workflow on pushes to `main` and scheduled every 6 hours.
 - Chrome-free demo generator example (`examples/generate_demo.rs`) writing `index.html`; the synthetic dataset is shared with `generate_screenshots` via `examples/common/demo_data.rs`.
 
 ### Changed
 - Point package `homepage` in `Cargo.toml` to the live GitHub Pages demo.
+
+### Fixed
+- **Disabled Quota Handling When Weekly Limit Reached**:
+  - Automatically detect and support disabled quota buckets when a model group exhausts its weekly quota (`0.0%`).
+  - Added backward-compatible `disabled: bool` and optional `reset_time` to `model::Sample`.
+  - Added `Status::Disabled` (`🚫 disabled`) prognosis state and clear display across TUI and HTML dashboards.
 
 ## [0.1.0] - 2026-10-12
 
@@ -46,4 +54,5 @@ Initial release of `agy-usage`: quota history, burn-rate prognosis, and interact
   - Standalone, stripped Linux x86_64 binary archives with SHA-256 checksums published via automated GitHub Release workflow.
   - Automated one-line curl installation script (`install.sh`) with automated SHA-256 checksum verification.
 
+[0.1.1]: https://github.com/danieljov/agy-usage/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/danieljov/agy-usage/releases/tag/v0.1.0
