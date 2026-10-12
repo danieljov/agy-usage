@@ -1,3 +1,14 @@
+//! Demo screenshot generator for `agy-usage`.
+//!
+//! Generates realistic synthetic quota samples starting at 100% and captures
+//! high-resolution screenshots of both the interactive TUI dashboard and
+//! self-contained HTML dashboard using headless Chrome or Chromium.
+//!
+//! Run with:
+//! ```bash
+//! cargo run --example generate_screenshots
+//! ```
+
 use std::path::Path;
 use std::process::Command;
 
@@ -6,9 +17,38 @@ use agy_usage::forecast::{self, BucketReport};
 use agy_usage::html;
 use agy_usage::model::Sample;
 use agy_usage::tui::{self, ViewState};
+use anyhow::Context;
 use chrono::{DateTime, Duration, Utc};
 use ratatui::style::{Color, Modifier};
 use unicode_width::UnicodeWidthStr;
+
+fn resolve_chrome_bin() -> anyhow::Result<String> {
+    if let Ok(bin) = std::env::var("CHROME_BIN") {
+        if !bin.is_empty() {
+            return Ok(bin);
+        }
+    }
+    let candidates = [
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+    ];
+    for candidate in candidates {
+        if Command::new(candidate)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return Ok(candidate.to_string());
+        }
+    }
+    anyhow::bail!(
+        "Failed to locate a Chrome or Chromium executable. \
+         Please ensure google-chrome or chromium is installed in PATH, or set CHROME_BIN."
+    )
+}
 
 fn generate_synthetic_samples(now: DateTime<Utc>) -> Vec<Sample> {
     let mut samples = Vec::new();
@@ -338,6 +378,14 @@ fn render_tui_to_html(
     content: ""; position: absolute; top: 0; bottom: 50%; left: 50%; width: 1px;
     background: currentColor; transform: translateX(-50%);
   }}
+  .box-vh::before {{
+    content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 1px;
+    background: currentColor; transform: translateY(-50%);
+  }}
+  .box-vh::after {{
+    content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 1px;
+    background: currentColor; transform: translateX(-50%);
+  }}
 </style>
 </head>
 <body>
@@ -361,6 +409,9 @@ fn render_tui_to_html(
 }
 
 fn main() -> anyhow::Result<()> {
+    let chrome_bin = resolve_chrome_bin()?;
+    println!("Using Chrome/Chromium binary: {chrome_bin}");
+
     let now = Utc::now();
     let samples = generate_synthetic_samples(now);
     let reports = forecast::analyze(&samples, 0.10);
@@ -382,6 +433,11 @@ fn main() -> anyhow::Result<()> {
         "maintainAspectRatio: false,",
         "maintainAspectRatio: false, animation: false,",
     );
+    anyhow::ensure!(
+        html_content.contains("animation: false,"),
+        "Failed to inject 'animation: false,' into dashboard HTML"
+    );
+
     let target_dir = Path::new("target");
     std::fs::create_dir_all(target_dir)?;
     let dashboard_html_path = target_dir.join("demo_dashboard.html");
@@ -392,7 +448,7 @@ fn main() -> anyhow::Result<()> {
     let dashboard_png = screenshots_dir.join("dashboard.png");
 
     println!("Capturing HTML dashboard screenshot...");
-    let chrome_dash = Command::new("google-chrome")
+    let chrome_dash = Command::new(&chrome_bin)
         .args([
             "--headless=new",
             "--disable-gpu",
@@ -401,16 +457,17 @@ fn main() -> anyhow::Result<()> {
             &format!("--screenshot={}", dashboard_png.display()),
             &format!("file://{}", dashboard_html_path.canonicalize()?.display()),
         ])
-        .output()?;
+        .output()
+        .with_context(|| format!("Failed to execute {chrome_bin} for dashboard capture"))?;
 
     if !chrome_dash.status.success() {
-        eprintln!(
-            "Chrome error: {}",
+        anyhow::bail!(
+            "Chrome dashboard capture failed with status {}: {}",
+            chrome_dash.status,
             String::from_utf8_lossy(&chrome_dash.stderr)
         );
-    } else {
-        println!("Captured {}", dashboard_png.display());
     }
+    println!("Captured {}", dashboard_png.display());
 
     // 2. Render and capture TUI dashboard
     let tui_html = render_tui_to_html(&reports, now, 110, 27, ClockFormat::H24);
@@ -419,7 +476,7 @@ fn main() -> anyhow::Result<()> {
 
     let tui_png = screenshots_dir.join("tui.png");
     println!("Capturing TUI screenshot...");
-    let chrome_tui = Command::new("google-chrome")
+    let chrome_tui = Command::new(&chrome_bin)
         .args([
             "--headless=new",
             "--disable-gpu",
@@ -428,15 +485,23 @@ fn main() -> anyhow::Result<()> {
             &format!("--screenshot={}", tui_png.display()),
             &format!("file://{}", tui_html_path.canonicalize()?.display()),
         ])
-        .output()?;
+        .output()
+        .with_context(|| format!("Failed to execute {chrome_bin} for TUI capture"))?;
 
     if !chrome_tui.status.success() {
-        eprintln!(
-            "Chrome error: {}",
+        anyhow::bail!(
+            "Chrome TUI capture failed with status {}: {}",
+            chrome_tui.status,
             String::from_utf8_lossy(&chrome_tui.stderr)
         );
-    } else {
-        println!("Captured {}", tui_png.display());
+    }
+    println!("Captured {}", tui_png.display());
+
+    // Clean up temporary HTML files unless KEEP_TEMP=1 is set
+    let keep_temp = std::env::var("KEEP_TEMP").map(|v| v == "1").unwrap_or(false);
+    if !keep_temp {
+        let _ = std::fs::remove_file(&dashboard_html_path);
+        let _ = std::fs::remove_file(&tui_html_path);
     }
 
     Ok(())
