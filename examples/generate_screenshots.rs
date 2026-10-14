@@ -374,6 +374,25 @@ fn main() -> anyhow::Result<()> {
         "Failed to inject 'animation: false,' into dashboard HTML"
     );
 
+    // Switch weekly charts to 7d range (and ensure 5h charts are at 24h) for demo screenshot
+    let range_selection_snippet = r#"
+            // Select 7d for weekly charts and 24h for 5h charts
+            document.querySelectorAll('.chart-card').forEach(card => {
+                if (card.querySelector('button[data-range="all"]')) {
+                    const btn7d = card.querySelector('button[data-range="7d"]');
+                    if (btn7d) btn7d.click();
+                } else if (card.querySelector('button[data-range="5h"]')) {
+                    const btn24h = card.querySelector('button[data-range="24h"]');
+                    if (btn24h) btn24h.click();
+                }
+            });
+            function updateRelativeTimes() {"#;
+    let html_content = html_content.replace("function updateRelativeTimes() {", range_selection_snippet);
+    anyhow::ensure!(
+        html_content.contains("btn7d.click()"),
+        "Failed to inject 7d/24h range selection into dashboard HTML"
+    );
+
     let target_dir = Path::new("target");
     std::fs::create_dir_all(target_dir)?;
     let dashboard_html_path = target_dir.join("demo_dashboard.html");
