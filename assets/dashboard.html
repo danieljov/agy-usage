@@ -353,15 +353,15 @@
                 const is5h = !!rep.window && rep.window.toLowerCase() === '5h';
                 const rangeHtml = isDis ? '' : (is5h ? `
                     <div class="range-toggle" role="group" aria-label="Time range" data-idx="${idx}">
-                        <button type="button" class="range-btn" data-range="5h" aria-pressed="false">5h</button>
-                        <button type="button" class="range-btn active" data-range="24h" aria-pressed="true">24h</button>
+                        <button type="button" class="range-btn active" data-range="5h" aria-pressed="true">5h</button>
+                        <button type="button" class="range-btn" data-range="24h" aria-pressed="false">24h</button>
                         <button type="button" class="range-btn" data-range="7d" aria-pressed="false">7d</button>
                         <button type="button" class="range-btn" data-range="30d" aria-pressed="false">30d</button>
                     </div>
                 ` : `
                     <div class="range-toggle" role="group" aria-label="Time range" data-idx="${idx}">
-                        <button type="button" class="range-btn" data-range="7d" aria-pressed="false">7d</button>
-                        <button type="button" class="range-btn active" data-range="30d" aria-pressed="true">30d</button>
+                        <button type="button" class="range-btn active" data-range="7d" aria-pressed="true">7d</button>
+                        <button type="button" class="range-btn" data-range="30d" aria-pressed="false">30d</button>
                         <button type="button" class="range-btn" data-range="all" aria-pressed="false">All</button>
                     </div>
                 `);
@@ -456,7 +456,7 @@
                     const rawLastMs = p.last_sample ? new Date(p.last_sample).getTime() : NaN;
                     const lastSampleMs = !isNaN(rawLastMs) ? rawLastMs : nowMs;
                     const endMs = (!isNaN(resetMs) && resetMs > nowMs) ? resetMs : Math.max(nowMs, lastSampleMs);
-                    const initialMin = is5h ? (endMs - 24 * 3600 * 1000) : (endMs - 30 * 86400 * 1000);
+                    const initialMin = is5h ? (endMs - 5 * 3600 * 1000) : (endMs - 7 * 86400 * 1000);
 
                     const chart = new Chart(canvas, {
                         type: 'line',

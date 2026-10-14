@@ -374,21 +374,6 @@ fn main() -> anyhow::Result<()> {
         .replace(
             "transition: color 0.15s ease, background 0.15s ease;",
             "transition: none !important;",
-        )
-        // Set 5h active by default for 5-hour cards in the preview screenshot
-        .replace(
-            "<button type=\"button\" class=\"range-btn\" data-range=\"5h\" aria-pressed=\"false\">5h</button>\n                        <button type=\"button\" class=\"range-btn active\" data-range=\"24h\" aria-pressed=\"true\">24h</button>",
-            "<button type=\"button\" class=\"range-btn active\" data-range=\"5h\" aria-pressed=\"true\">5h</button>\n                        <button type=\"button\" class=\"range-btn\" data-range=\"24h\" aria-pressed=\"false\">24h</button>",
-        )
-        // Set 7d active by default for weekly cards in the preview screenshot
-        .replace(
-            "<button type=\"button\" class=\"range-btn\" data-range=\"7d\" aria-pressed=\"false\">7d</button>\n                        <button type=\"button\" class=\"range-btn active\" data-range=\"30d\" aria-pressed=\"true\">30d</button>",
-            "<button type=\"button\" class=\"range-btn active\" data-range=\"7d\" aria-pressed=\"true\">7d</button>\n                        <button type=\"button\" class=\"range-btn\" data-range=\"30d\" aria-pressed=\"false\">30d</button>",
-        )
-        // Set initial viewports to 5h and 7d directly
-        .replace(
-            "const initialMin = is5h ? (endMs - 24 * 3600 * 1000) : (endMs - 30 * 86400 * 1000);",
-            "const initialMin = is5h ? (endMs - 5 * 3600 * 1000) : (endMs - 7 * 86400 * 1000);",
         );
 
     anyhow::ensure!(
@@ -401,11 +386,11 @@ fn main() -> anyhow::Result<()> {
     );
     anyhow::ensure!(
         html_content.contains("class=\"range-btn active\" data-range=\"5h\""),
-        "Failed to set 5h range button active in dashboard HTML"
+        "Expected 5h range button active in dashboard HTML"
     );
     anyhow::ensure!(
         html_content.contains("class=\"range-btn active\" data-range=\"7d\""),
-        "Failed to set 7d range button active in dashboard HTML"
+        "Expected 7d range button active in dashboard HTML"
     );
 
     let target_dir = Path::new("target");

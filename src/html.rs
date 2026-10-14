@@ -305,24 +305,30 @@ mod tests {
         // Consistent 5h viewport bounds
         assert!(output.contains("chart.options.scales.x.min = endMs - 5 * 3600 * 1000;"));
 
-        // Window-aware defaults in chart initialization
+        // Window-aware defaults in chart initialization: 5h defaults to 5h, weekly defaults to 7d
+        assert!(output.contains(
+            "const initialMin = is5h ? (endMs - 5 * 3600 * 1000) : (endMs - 7 * 86400 * 1000);"
+        ));
         assert!(output.contains("min: initialMin"));
         assert!(output.contains("max: endMs"));
         assert!(output.contains("chart.options.scales.x.min"));
         assert!(output.contains("chart.options.scales.x.max"));
         assert!(output.contains("chart.update('none')"));
 
-        // Template exclusivity: 5h template has 5h/24h default; weekly has 30d default
+        // Template exclusivity: 5h template has 5h active default; weekly has 7d active default
         let (_, range_section) = output
             .split_once("const rangeHtml = isDis ? '' : (is5h ? `")
             .expect("rangeHtml section found");
         let (h_5h, h_weekly) = range_section
             .split_once("` : `")
             .expect("both template branches present");
-        assert!(h_5h.contains("data-range=\"5h\""));
-        assert!(h_5h.contains("class=\"range-btn active\" data-range=\"24h\""));
+        assert!(h_5h.contains("class=\"range-btn active\" data-range=\"5h\""));
+        assert!(h_5h.contains("data-range=\"24h\""));
+        assert!(!h_5h.contains("class=\"range-btn active\" data-range=\"24h\""));
         assert!(!h_5h.contains("data-range=\"all\""));
-        assert!(h_weekly.contains("class=\"range-btn active\" data-range=\"30d\""));
+        assert!(h_weekly.contains("class=\"range-btn active\" data-range=\"7d\""));
+        assert!(h_weekly.contains("data-range=\"30d\""));
+        assert!(!h_weekly.contains("class=\"range-btn active\" data-range=\"30d\""));
         assert!(h_weekly.contains("data-range=\"all\""));
         assert!(!h_weekly.contains("data-range=\"5h\""));
         assert!(!h_weekly.contains("data-range=\"24h\""));
