@@ -507,7 +507,7 @@
                                     dates: Array.from(new Set([
                                         ...(rep.boundaries || []),
                                         ...(rep.reset_time ? [rep.reset_time] : [])
-                                     ])).map(d => new Date(d).getTime()).filter(t => !isNaN(t))
+                                    ])).map(d => new Date(d).getTime()).filter(t => !isNaN(t))
                                 }
                             }
                         }
