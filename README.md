@@ -19,7 +19,7 @@ Quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Goog
 
 [![HTML Web Dashboard](https://raw.githubusercontent.com/danieljov/agy-usage/main/assets/screenshots/dashboard.png)](https://danieljov.github.io/agy-usage)
 
-Features **window-aware defaults** (5h charts default to 24h, weekly to 30d) and **client-side range toggles** (`5h`, `24h`, `7d`, `30d`, `All`) with automatic reset line decluttering past 48h and 100% offline vendored assets.
+Features **window-aware defaults** (5h charts default to 5h, weekly to 7d) and **client-side range toggles** (`5h`, `24h`, `7d`, `30d`, `All`) with automatic reset line decluttering past 48h and 100% offline vendored assets.
 
 The [live demo](https://danieljov.github.io/agy-usage) is rendered from synthetic data and rebuilt every 6 hours (as well as on pushes to `main`) via GitHub Actions (`cargo run --example generate_demo`). Relative timestamps and exhaustion prognoses reflect the state at the last deployment.
 
