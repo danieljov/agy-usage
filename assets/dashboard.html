@@ -90,9 +90,44 @@
             justify-content: space-between;
             align-items: center;
             margin-bottom: 1rem;
+            flex-wrap: wrap;
+            gap: 0.5rem;
         }
         .chart-title {
             font-size: 1rem;
+            font-weight: 600;
+        }
+        .range-toggle {
+            display: inline-flex;
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 2px;
+            gap: 2px;
+        }
+        .range-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-dim);
+            font-size: 0.75rem;
+            font-weight: 500;
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            cursor: pointer;
+            line-height: 1.2;
+            transition: color 0.15s ease, background 0.15s ease;
+        }
+        .range-btn:hover {
+            color: var(--text);
+            background: rgba(255, 255, 255, 0.05);
+        }
+        .range-btn:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 1px;
+        }
+        .range-btn.active {
+            background: rgba(56, 189, 248, 0.2);
+            color: var(--accent);
             font-weight: 600;
         }
         .badge {
@@ -240,15 +275,18 @@
         const boundaryPlugin = {
             id: 'boundaries',
             beforeDraw: (chart) => {
-                const dates = chart.config.options.plugins?.boundaries?.dates || [];
+                const boundaries = chart.options?.plugins?.boundaries || chart.config?.options?.plugins?.boundaries;
+                if (boundaries?.display === false) return;
+                const dates = boundaries?.dates || [];
                 if (!dates.length) return;
+                if (!chart.chartArea || !chart.scales?.x) return;
                 const { ctx, chartArea: { top, bottom, left, right }, scales: { x } } = chart;
                 ctx.save();
                 ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
                 ctx.lineWidth = 1;
                 ctx.setLineDash([3, 3]);
-                dates.forEach(b => {
-                    const xPos = x.getPixelForValue(new Date(b).getTime());
+                dates.forEach(timeMs => {
+                    const xPos = x.getPixelForValue(timeMs);
                     if (xPos >= left && xPos <= right) {
                         ctx.beginPath();
                         ctx.moveTo(xPos, top);
@@ -312,11 +350,28 @@
                 const badgeText = isDis ? 'disabled' : `${leftStr} left`;
                 const badgeClass = isDis ? 'badge badge-disabled' : 'badge';
 
+                const is5h = !!rep.window && rep.window.toLowerCase() === '5h';
+                const rangeHtml = isDis ? '' : (is5h ? `
+                    <div class="range-toggle" role="group" aria-label="Time range" data-idx="${idx}">
+                        <button type="button" class="range-btn" data-range="5h" aria-pressed="false">5h</button>
+                        <button type="button" class="range-btn active" data-range="24h" aria-pressed="true">24h</button>
+                        <button type="button" class="range-btn" data-range="7d" aria-pressed="false">7d</button>
+                        <button type="button" class="range-btn" data-range="30d" aria-pressed="false">30d</button>
+                    </div>
+                ` : `
+                    <div class="range-toggle" role="group" aria-label="Time range" data-idx="${idx}">
+                        <button type="button" class="range-btn" data-range="7d" aria-pressed="false">7d</button>
+                        <button type="button" class="range-btn active" data-range="30d" aria-pressed="true">30d</button>
+                        <button type="button" class="range-btn" data-range="all" aria-pressed="false">All</button>
+                    </div>
+                `);
+
                 const card = document.createElement('div');
                 card.className = 'chart-card';
                 card.innerHTML = `
                     <div class="chart-header">
                         <div class="chart-title">${escapeHtml(title)}</div>
+                        ${rangeHtml}
                         <span class="${badgeClass}">${escapeHtml(badgeText)}</span>
                     </div>
                     <div class="chart-box">
@@ -396,7 +451,14 @@
                     box.style.borderRadius = '6px';
                     box.innerHTML = '<strong style="color:var(--text);font-size:1.05rem;margin-bottom:0.25rem;">Disabled</strong><span>Weekly limit reached</span>';
                 } else if (typeof Chart !== 'undefined') {
-                    new Chart(canvas, {
+                    const nowMs = !isNaN(genDate.getTime()) ? genDate.getTime() : Date.now();
+                    const resetMs = rep.reset_time ? new Date(rep.reset_time).getTime() : NaN;
+                    const rawLastMs = p.last_sample ? new Date(p.last_sample).getTime() : NaN;
+                    const lastSampleMs = !isNaN(rawLastMs) ? rawLastMs : nowMs;
+                    const endMs = (!isNaN(resetMs) && resetMs > nowMs) ? resetMs : Math.max(nowMs, lastSampleMs);
+                    const initialMin = is5h ? (endMs - 24 * 3600 * 1000) : (endMs - 30 * 86400 * 1000);
+
+                    const chart = new Chart(canvas, {
                         type: 'line',
                         data: { datasets },
                         options: {
@@ -408,6 +470,8 @@
                                 x: {
                                     type: 'time',
                                     time: chartTimeOptions(),
+                                    min: initialMin,
+                                    max: endMs,
                                     grid: { color: 'rgba(255, 255, 255, 0.05)' },
                                     ticks: { color: '#94a3b8' }
                                 },
@@ -438,14 +502,59 @@
                                     labels: { color: '#94a3b8', boxWidth: 12 }
                                 },
                                 boundaries: {
+                                    display: true,
                                     dates: Array.from(new Set([
                                         ...(rep.boundaries || []),
                                         ...(rep.reset_time ? [rep.reset_time] : [])
-                                    ]))
+                                    ])).map(d => new Date(d).getTime()).filter(t => !isNaN(t))
                                 }
                             }
                         }
                     });
+
+                    const toggleContainer = card.querySelector('.range-toggle');
+                    if (toggleContainer) {
+                        toggleContainer.addEventListener('click', (e) => {
+                            const btn = e.target.closest('.range-btn');
+                            if (!btn || btn.classList.contains('active')) return;
+
+                            const range = btn.dataset.range;
+                            let handled = true;
+
+                            if (range === '5h') {
+                                chart.options.scales.x.min = endMs - 5 * 3600 * 1000;
+                                chart.options.scales.x.max = endMs;
+                                if (is5h) chart.options.plugins.boundaries.display = true;
+                            } else if (range === '24h') {
+                                chart.options.scales.x.min = endMs - 24 * 3600 * 1000;
+                                chart.options.scales.x.max = endMs;
+                                if (is5h) chart.options.plugins.boundaries.display = true;
+                            } else if (range === '7d') {
+                                chart.options.scales.x.min = endMs - 7 * 86400 * 1000;
+                                chart.options.scales.x.max = endMs;
+                                if (is5h) chart.options.plugins.boundaries.display = false;
+                            } else if (range === '30d') {
+                                chart.options.scales.x.min = endMs - 30 * 86400 * 1000;
+                                chart.options.scales.x.max = endMs;
+                                if (is5h) chart.options.plugins.boundaries.display = false;
+                            } else if (range === 'all') {
+                                delete chart.options.scales.x.min;
+                                chart.options.scales.x.max = endMs;
+                                chart.options.plugins.boundaries.display = false;
+                            } else {
+                                handled = false;
+                            }
+
+                            if (handled) {
+                                toggleContainer.querySelectorAll('.range-btn').forEach(b => {
+                                    const isActive = b === btn;
+                                    b.classList.toggle('active', isActive);
+                                    b.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+                                });
+                                chart.update('none');
+                            }
+                        });
+                    }
                 } else {
                     const box = card.querySelector('.chart-box');
                     box.style.display = 'flex';

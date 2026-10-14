@@ -258,6 +258,77 @@ mod tests {
     }
 
     #[test]
+    fn range_toggle_and_window_aware_defaults() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
+        let s_5h = Sample {
+            ts: now,
+            group: "3p Models".to_string(),
+            bucket_id: "3p-5h".to_string(),
+            window: "5h".to_string(),
+            remaining: 0.8,
+            reset_time: Some(now + Duration::hours(5)),
+            disabled: false,
+        };
+        let rep_5h = make_report("3p Models", "3p-5h", "5h", vec![s_5h]);
+        let s_weekly = Sample {
+            ts: now,
+            group: "Gemini".to_string(),
+            bucket_id: "gemini-weekly".to_string(),
+            window: "weekly".to_string(),
+            remaining: 0.85,
+            reset_time: Some(now + Duration::days(6)),
+            disabled: false,
+        };
+        let rep_weekly = make_report("Gemini", "gemini-weekly", "weekly", vec![s_weekly]);
+        let output = render(&[rep_5h, rep_weekly], now, 30, ClockFormat::H24);
+
+        // UI markup & styling
+        assert!(output.contains(".range-toggle"));
+        assert!(output.contains(".range-btn"));
+        assert!(output.contains(".range-btn:focus-visible"));
+        assert!(output.contains("class=\"range-toggle\""));
+
+        // Accessibility attributes
+        assert!(output.contains("role=\"group\""));
+        assert!(output.contains("aria-label=\"Time range\""));
+        assert!(output.contains("aria-pressed=\"true\""));
+        assert!(output.contains("aria-pressed=\"false\""));
+        assert!(output.contains("b.setAttribute('aria-pressed', isActive ? 'true' : 'false')"));
+
+        // Negative boundary: disabled buckets suppress range toggle controls
+        assert!(output.contains("const rangeHtml = isDis ? '' :"));
+
+        // Boundary plugin checks display property and chartArea existence
+        assert!(output.contains("boundaries?.display === false"));
+        assert!(output.contains("!chart.chartArea || !chart.scales?.x"));
+
+        // Consistent 5h viewport bounds
+        assert!(output.contains("chart.options.scales.x.min = endMs - 5 * 3600 * 1000;"));
+
+        // Window-aware defaults in chart initialization
+        assert!(output.contains("min: initialMin"));
+        assert!(output.contains("max: endMs"));
+        assert!(output.contains("chart.options.scales.x.min"));
+        assert!(output.contains("chart.options.scales.x.max"));
+        assert!(output.contains("chart.update('none')"));
+
+        // Template exclusivity: 5h template has 5h/24h default; weekly has 30d default
+        let (_, range_section) = output
+            .split_once("const rangeHtml = isDis ? '' : (is5h ? `")
+            .expect("rangeHtml section found");
+        let (h_5h, h_weekly) = range_section
+            .split_once("` : `")
+            .expect("both template branches present");
+        assert!(h_5h.contains("data-range=\"5h\""));
+        assert!(h_5h.contains("class=\"range-btn active\" data-range=\"24h\""));
+        assert!(!h_5h.contains("data-range=\"all\""));
+        assert!(h_weekly.contains("class=\"range-btn active\" data-range=\"30d\""));
+        assert!(h_weekly.contains("data-range=\"all\""));
+        assert!(!h_weekly.contains("data-range=\"5h\""));
+        assert!(!h_weekly.contains("data-range=\"24h\""));
+    }
+
+    #[test]
     fn serializes_will_run_out_prognosis_with_empty_at() {
         let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
         let empty = now + Duration::hours(3);
