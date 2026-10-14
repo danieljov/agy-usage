@@ -365,32 +365,47 @@ fn main() -> anyhow::Result<()> {
 
     // 1. Render and capture HTML dashboard
     let html_content = html::render(&reports, now, 30, ClockFormat::H24);
-    let html_content = html_content.replace(
-        "maintainAspectRatio: false,",
-        "maintainAspectRatio: false, animation: false,",
-    );
+    let html_content = html_content
+        .replace(
+            "maintainAspectRatio: false,",
+            "maintainAspectRatio: false, animation: false,",
+        )
+        // Disable transitions to eliminate mid-transition rendering artifacts
+        .replace(
+            "transition: color 0.15s ease, background 0.15s ease;",
+            "transition: none !important;",
+        )
+        // Set 5h active by default for 5-hour cards in the preview screenshot
+        .replace(
+            "<button type=\"button\" class=\"range-btn\" data-range=\"5h\" aria-pressed=\"false\">5h</button>\n                        <button type=\"button\" class=\"range-btn active\" data-range=\"24h\" aria-pressed=\"true\">24h</button>",
+            "<button type=\"button\" class=\"range-btn active\" data-range=\"5h\" aria-pressed=\"true\">5h</button>\n                        <button type=\"button\" class=\"range-btn\" data-range=\"24h\" aria-pressed=\"false\">24h</button>",
+        )
+        // Set 7d active by default for weekly cards in the preview screenshot
+        .replace(
+            "<button type=\"button\" class=\"range-btn\" data-range=\"7d\" aria-pressed=\"false\">7d</button>\n                        <button type=\"button\" class=\"range-btn active\" data-range=\"30d\" aria-pressed=\"true\">30d</button>",
+            "<button type=\"button\" class=\"range-btn active\" data-range=\"7d\" aria-pressed=\"true\">7d</button>\n                        <button type=\"button\" class=\"range-btn\" data-range=\"30d\" aria-pressed=\"false\">30d</button>",
+        )
+        // Set initial viewports to 5h and 7d directly
+        .replace(
+            "const initialMin = is5h ? (endMs - 24 * 3600 * 1000) : (endMs - 30 * 86400 * 1000);",
+            "const initialMin = is5h ? (endMs - 5 * 3600 * 1000) : (endMs - 7 * 86400 * 1000);",
+        );
+
     anyhow::ensure!(
         html_content.contains("animation: false,"),
         "Failed to inject 'animation: false,' into dashboard HTML"
     );
-
-    // Switch weekly charts to 7d range (and ensure 5h charts are at 24h) for demo screenshot
-    let range_selection_snippet = r#"
-            // Select 7d for weekly charts and 24h for 5h charts
-            document.querySelectorAll('.chart-card').forEach(card => {
-                if (card.querySelector('button[data-range="all"]')) {
-                    const btn7d = card.querySelector('button[data-range="7d"]');
-                    if (btn7d) btn7d.click();
-                } else if (card.querySelector('button[data-range="5h"]')) {
-                    const btn24h = card.querySelector('button[data-range="24h"]');
-                    if (btn24h) btn24h.click();
-                }
-            });
-            function updateRelativeTimes() {"#;
-    let html_content = html_content.replace("function updateRelativeTimes() {", range_selection_snippet);
     anyhow::ensure!(
-        html_content.contains("btn7d.click()"),
-        "Failed to inject 7d/24h range selection into dashboard HTML"
+        html_content.contains("transition: none !important;"),
+        "Failed to disable transitions in dashboard HTML"
+    );
+    anyhow::ensure!(
+        html_content.contains("class=\"range-btn active\" data-range=\"5h\""),
+        "Failed to set 5h range button active in dashboard HTML"
+    );
+    anyhow::ensure!(
+        html_content.contains("class=\"range-btn active\" data-range=\"7d\""),
+        "Failed to set 7d range button active in dashboard HTML"
     );
 
     let target_dir = Path::new("target");
