@@ -19,6 +19,8 @@ Quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Goog
 
 [![HTML Web Dashboard](https://raw.githubusercontent.com/danieljov/agy-usage/main/assets/screenshots/dashboard.png)](https://danieljov.github.io/agy-usage)
 
+Features **window-aware defaults** (5h charts default to 24h, weekly to 30d) and **client-side range toggles** (`5h`, `24h`, `7d`, `30d`, `All`) with automatic reset line decluttering past 48h and 100% offline vendored assets.
+
 The [live demo](https://danieljov.github.io/agy-usage) is rendered from synthetic data and rebuilt every 6 hours (as well as on pushes to `main`) via GitHub Actions (`cargo run --example generate_demo`). Relative timestamps and exhaustion prognoses reflect the state at the last deployment.
 
 ## Installation
@@ -38,7 +40,7 @@ Pre-compiled standalone binaries for Linux (`x86_64-unknown-linux-gnu`) are publ
 #### Using `curl`
 ```bash
 TMP_DIR=$(mktemp -d)
-curl -fsSL https://github.com/danieljov/agy-usage/releases/download/v0.1.0/agy-usage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C "$TMP_DIR"
+curl -fsSL https://github.com/danieljov/agy-usage/releases/download/v0.1.2/agy-usage-v0.1.2-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C "$TMP_DIR"
 mkdir -p ~/.local/bin
 mv "$TMP_DIR"/agy-usage-*/agy-usage ~/.local/bin/
 rm -rf "$TMP_DIR"
