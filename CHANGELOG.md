@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-14
+
+### Added
+- **Window-Aware Defaults & Client-Side Range Toggles in HTML Dashboard**:
+  - 5-hour quota charts default to a 24-hour viewport (`now - 20h` to `reset_time`), keeping ~20% of the canvas for the active window to display pacing and burn-rate slopes cleanly. Weekly charts default to 30 days.
+  - Interactive pill range toggles on chart headers: `[ 5h | 24h | 7d | 30d ]` on 5-hour charts (where `5h` gives 1:1 parity with the TUI pacing focus), and `[ 7d | 30d | All ]` on weekly charts.
+  - Automatic reset boundary line suppression on 5-hour charts when viewing ranges > 48h (`7d`, `30d`), eliminating vertical barcode clutter while keeping sawtooth resets clear.
+  - Zero-allocation performance hardening in Chart.js `beforeDraw` boundary drawing loop via pre-parsed epoch timestamps.
+  - Full WCAG accessibility support (`role="group"`, `aria-label="Time range"`, `aria-pressed`, `:focus-visible` keyboard focus outline).
+
 ## [0.1.1] - 2026-10-13
 
 ### Added
@@ -54,5 +64,6 @@ Initial release of `agy-usage`: quota history, burn-rate prognosis, and interact
   - Standalone, stripped Linux x86_64 binary archives with SHA-256 checksums published via automated GitHub Release workflow.
   - Automated one-line curl installation script (`install.sh`) with automated SHA-256 checksum verification.
 
+[0.1.2]: https://github.com/danieljov/agy-usage/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/danieljov/agy-usage/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/danieljov/agy-usage/releases/tag/v0.1.0
