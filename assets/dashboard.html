@@ -456,7 +456,8 @@
                     const rawLastMs = p.last_sample ? new Date(p.last_sample).getTime() : NaN;
                     const lastSampleMs = !isNaN(rawLastMs) ? rawLastMs : nowMs;
                     const endMs = (!isNaN(resetMs) && resetMs > nowMs) ? resetMs : Math.max(nowMs, lastSampleMs);
-                    const initialMin = is5h ? (endMs - 5 * 3600 * 1000) : (endMs - 7 * 86400 * 1000);
+                    const rawMin = is5h ? (endMs - 5 * 3600 * 1000) : (endMs - 7 * 86400 * 1000);
+                    const initialMin = Math.min(rawMin, lastSampleMs);
 
                     const chart = new Chart(canvas, {
                         type: 'line',
@@ -506,7 +507,7 @@
                                     dates: Array.from(new Set([
                                         ...(rep.boundaries || []),
                                         ...(rep.reset_time ? [rep.reset_time] : [])
-                                    ])).map(d => new Date(d).getTime()).filter(t => !isNaN(t))
+                                     ])).map(d => new Date(d).getTime()).filter(t => !isNaN(t))
                                 }
                             }
                         }
@@ -522,21 +523,21 @@
                             let handled = true;
 
                             if (range === '5h') {
-                                chart.options.scales.x.min = endMs - 5 * 3600 * 1000;
+                                chart.options.scales.x.min = Math.min(endMs - 5 * 3600 * 1000, lastSampleMs);
                                 chart.options.scales.x.max = endMs;
                                 if (is5h) chart.options.plugins.boundaries.display = true;
                             } else if (range === '24h') {
-                                chart.options.scales.x.min = endMs - 24 * 3600 * 1000;
+                                chart.options.scales.x.min = Math.min(endMs - 24 * 3600 * 1000, lastSampleMs);
                                 chart.options.scales.x.max = endMs;
                                 if (is5h) chart.options.plugins.boundaries.display = true;
                             } else if (range === '7d') {
-                                chart.options.scales.x.min = endMs - 7 * 86400 * 1000;
+                                chart.options.scales.x.min = Math.min(endMs - 7 * 86400 * 1000, lastSampleMs);
                                 chart.options.scales.x.max = endMs;
-                                if (is5h) chart.options.plugins.boundaries.display = false;
+                                chart.options.plugins.boundaries.display = !is5h;
                             } else if (range === '30d') {
-                                chart.options.scales.x.min = endMs - 30 * 86400 * 1000;
+                                chart.options.scales.x.min = Math.min(endMs - 30 * 86400 * 1000, lastSampleMs);
                                 chart.options.scales.x.max = endMs;
-                                if (is5h) chart.options.plugins.boundaries.display = false;
+                                chart.options.plugins.boundaries.display = !is5h;
                             } else if (range === 'all') {
                                 delete chart.options.scales.x.min;
                                 chart.options.scales.x.max = endMs;
