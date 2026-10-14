@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-14
+
+### Changed
+- **Optimized Window Defaults in HTML Dashboard**:
+  - 5-hour quota charts now default to `5h` (matching TUI pacing focus 1:1), displaying the full active window slope, diagonal budget line, and burn-rate projection.
+  - Weekly quota charts now default to `7d` (with `30d` and `All` available via toggle).
+
+### Fixed
+- **Viewport Clamping Against Clock Drift**:
+  - Clamped viewport lower bounds with `Math.min(rawMin, lastSampleMs)` during chart initialization and button clicks, ensuring data points are never clipped out if the client clock lags behind the API server's reset timestamp.
+- **Weekly Card Reset Boundary Restoration**:
+  - Fixed symmetrical boundary visibility restoration (`boundaries.display = !is5h`) on weekly charts when switching back to `7d` or `30d` after `All`.
+
 ## [0.1.2] - 2026-10-14
 
 ### Added
@@ -64,6 +77,7 @@ Initial release of `agy-usage`: quota history, burn-rate prognosis, and interact
   - Standalone, stripped Linux x86_64 binary archives with SHA-256 checksums published via automated GitHub Release workflow.
   - Automated one-line curl installation script (`install.sh`) with automated SHA-256 checksum verification.
 
+[0.1.3]: https://github.com/danieljov/agy-usage/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/danieljov/agy-usage/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/danieljov/agy-usage/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/danieljov/agy-usage/releases/tag/v0.1.0
