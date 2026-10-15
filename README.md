@@ -1,6 +1,7 @@
 # agy-usage
 
 [![CI](https://github.com/danieljov/agy-usage/actions/workflows/ci.yml/badge.svg)](https://github.com/danieljov/agy-usage/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/agy-usage.svg)](https://crates.io/crates/agy-usage)
 [![Live Demo](https://img.shields.io/badge/demo-live-brightgreen?logo=github)](https://danieljov.github.io/agy-usage)
 
 Quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Google Antigravity.
@@ -66,11 +67,11 @@ agy-usage --help
 Ensure Rust 1.99+ is installed:
 
 ```bash
+# From crates.io
+cargo install agy-usage
+
 # From git repository
 cargo install --git https://github.com/danieljov/agy-usage.git
-
-# From crates.io (once published)
-cargo install agy-usage
 
 # Or build and install from a local clone
 cargo install --path .
