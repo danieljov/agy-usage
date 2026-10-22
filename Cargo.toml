@@ -1,6 +1,6 @@
 [package]
 name = "agy-usage"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 description = "Quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Google Antigravity"

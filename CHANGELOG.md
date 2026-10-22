@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-23
+
+### Added
+- **CLI `--version` / `-V` Support**:
+  - Enabled `version` on the top-level CLI parser so `agy-usage --version` and `agy-usage -V` output `agy-usage <CARGO_PKG_VERSION>`.
+- **Next Reset Countdown & Timestamp Display**:
+  - Added a responsive `"Resets"` column (`in Xd Yh (HH:MM)` / `in Xh Ym (h:mm AM/PM)`) to the TUI summary table on terminals `>= 110` columns while preserving the 80-column 8-column table layout on narrower terminals.
+  - Added Unicode-width-aware reset countdown suffixes (`· resets in Xd Yh (HH:MM)` with fallback to `· resets in Xd Yh`) to TUI chart block titles so 80-column stacked charts and 2-column split panes also surface reset times.
+  - Added a `"Resets"` column to the HTML dashboard summary table with 30-second live countdown refreshes in `updateRelativeTimes()`.
+  - Plumbed `ClockFormat` into `tui::run()` so interactive TUI and `--once` share consistent 12h/24h formatting.
+- **Interactive TUI Time-Range Cycling (`t` / `w`)**:
+  - Added `t` and `w` keybindings in `agy-usage show` to cycle chart time ranges (`Window` [default], `24h`, `7d`, `30d`, `All`), matching the web dashboard's range toggle.
+  - Plots full bucket history across multi-window ranges and renders vertical `│` reset boundaries while suppressing 5-hour boundary barcode clutter on ranges `> 48h` (`7d`, `30d`, `All`).
+- **Automated Crates.io Release Publishing**:
+  - Extended `.github/workflows/release.yml` to idempotently publish new tag releases to crates.io via Crates.io Trusted Publishing (OIDC) or `CARGO_REGISTRY_TOKEN` after verification and GitHub Release asset uploads succeed.
+
+### Changed
+- **Library API (`agy_usage::tui::run`)**:
+  - `tui::run` now accepts a `ClockFormat` parameter (`tui::run(data_dir, tight, agy_bin, clock)`) so interactive and single-frame terminal views share unified clock formatting.
+
 ## [0.1.4] - 2026-10-22
 
 ### Fixed
@@ -89,6 +109,7 @@ Initial release of `agy-usage`: quota history, burn-rate prognosis, and interact
   - Standalone, stripped Linux x86_64 binary archives with SHA-256 checksums published via automated GitHub Release workflow.
   - Automated one-line curl installation script (`install.sh`) with automated SHA-256 checksum verification.
 
+[0.2.0]: https://github.com/danieljov/agy-usage/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/danieljov/agy-usage/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/danieljov/agy-usage/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/danieljov/agy-usage/compare/v0.1.1...v0.1.2
