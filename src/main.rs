@@ -187,11 +187,12 @@ fn main() -> Result<()> {
                 eprintln!("warning: skipped {} corrupt lines", loaded.skipped);
             }
             let reports = agy_usage::forecast::analyze(&loaded.samples, cli.tight_threshold);
+            let clock = cli.clock.resolve();
             if once {
-                agy_usage::tui::print_once(&reports, Utc::now(), cli.clock.resolve())?;
+                agy_usage::tui::print_once(&reports, Utc::now(), clock)?;
             } else {
                 let agy_bin = agy_usage::source::agy_bin();
-                agy_usage::tui::run(&data_dir, cli.tight_threshold, &agy_bin)?;
+                agy_usage::tui::run(&data_dir, cli.tight_threshold, &agy_bin, clock)?;
             }
         }
         Commands::Html { open, out } => {

@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::{Duration as StdDuration, Instant};
 
 use anyhow::Result;
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local, TimeZone, Utc};
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -13,10 +13,52 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Axis, Block, Borders, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table,
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::clock::ClockFormat;
 use crate::forecast::{BucketReport, Status};
 use crate::model::Sample;
+
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeRange {
+    #[default]
+    Window,
+    H24,
+    D7,
+    D30,
+    All,
+}
+
+impl TimeRange {
+    pub fn next(self) -> Self {
+        match self {
+            TimeRange::Window => TimeRange::H24,
+            TimeRange::H24 => TimeRange::D7,
+            TimeRange::D7 => TimeRange::D30,
+            TimeRange::D30 => TimeRange::All,
+            TimeRange::All => TimeRange::Window,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TimeRange::Window => "Window",
+            TimeRange::H24 => "24h",
+            TimeRange::D7 => "7d",
+            TimeRange::D30 => "30d",
+            TimeRange::All => "All",
+        }
+    }
+
+    fn duration_secs(self) -> Option<f64> {
+        match self {
+            TimeRange::Window | TimeRange::All => None,
+            TimeRange::H24 => Some(24.0 * 3600.0),
+            TimeRange::D7 => Some(7.0 * 86400.0),
+            TimeRange::D30 => Some(30.0 * 86400.0),
+        }
+    }
+}
 
 #[derive(Default, Debug, Clone)]
 pub struct ViewState {
@@ -24,6 +66,162 @@ pub struct ViewState {
     pub message: Option<String>,
     pub is_once: bool,
     pub clock: ClockFormat,
+    pub time_range: TimeRange,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChartViewport {
+    pub x_min: f64,
+    pub x_max: f64,
+    pub actual_pts: Vec<(f64, f64)>,
+    pub boundary_xs: Vec<f64>,
+    pub show_boundaries: bool,
+}
+
+pub fn format_time_until(target: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let diff = (target - now).num_seconds();
+    if diff <= 0 {
+        "now".to_string()
+    } else if diff < 60 {
+        "in <1m".to_string()
+    } else if diff < 3600 {
+        format!("in {}m", diff / 60)
+    } else if diff < 86400 {
+        let h = diff / 3600;
+        let m = (diff % 3600) / 60;
+        if m > 0 {
+            format!("in {}h {}m", h, m)
+        } else {
+            format!("in {}h", h)
+        }
+    } else {
+        let d = diff / 86400;
+        let h = (diff % 86400) / 3600;
+        if h > 0 {
+            format!("in {}d {}h", d, h)
+        } else {
+            format!("in {}d", d)
+        }
+    }
+}
+
+pub fn format_reset_cell_with_tz<Tz: TimeZone>(
+    rep: &BucketReport,
+    now: DateTime<Utc>,
+    clock: ClockFormat,
+    tz: &Tz,
+) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    if rep.prognosis.status == Status::Disabled {
+        return "—".to_string();
+    }
+    let Some(rt) = rep.prognosis.reset_time else {
+        return "—".to_string();
+    };
+    if (rt - now).num_seconds() <= 0 {
+        return "now".to_string();
+    }
+    let countdown = format_time_until(rt, now);
+    let local_time = clock.format_time(&rt.with_timezone(tz));
+    format!("{countdown} ({local_time})")
+}
+
+pub fn format_reset_cell(rep: &BucketReport, now: DateTime<Utc>, clock: ClockFormat) -> String {
+    format_reset_cell_with_tz(rep, now, clock, &Local)
+}
+
+pub fn chart_viewport(rep: &BucketReport, time_range: TimeRange) -> Option<ChartViewport> {
+    let reset_time = rep.prognosis.reset_time?;
+    let last_sample_ts = rep.prognosis.last_sample.timestamp() as f64;
+    let end_ts = (reset_time.timestamp() as f64).max(last_sample_ts);
+
+    let mut x_min = match time_range {
+        TimeRange::Window => {
+            let raw_min = rep
+                .window_start
+                .map(|ws| ws.timestamp() as f64)
+                .unwrap_or_else(|| {
+                    rep.history
+                        .first()
+                        .map(|s| s.ts.timestamp() as f64)
+                        .unwrap_or(last_sample_ts)
+                });
+            raw_min.min(last_sample_ts)
+        }
+        TimeRange::H24 | TimeRange::D7 | TimeRange::D30 => {
+            let dur = time_range.duration_secs().unwrap_or(0.0);
+            let raw_min = end_ts - dur;
+            if raw_min > last_sample_ts {
+                rep.history
+                    .iter()
+                    .map(|s| s.ts.timestamp() as f64)
+                    .find(|&t| t >= last_sample_ts - dur)
+                    .unwrap_or(last_sample_ts)
+                    .min(last_sample_ts)
+            } else {
+                raw_min.min(last_sample_ts)
+            }
+        }
+        TimeRange::All => {
+            let first_ts = rep
+                .history
+                .first()
+                .map(|s| s.ts.timestamp() as f64)
+                .unwrap_or(last_sample_ts);
+            let ws_ts = rep
+                .window_start
+                .map(|ws| ws.timestamp() as f64)
+                .unwrap_or(first_ts);
+            first_ts.min(ws_ts).min(last_sample_ts)
+        }
+    };
+
+    let mut x_max = end_ts;
+    if x_min >= x_max {
+        x_min = x_max - 3600.0;
+        x_max += 1.0;
+    }
+
+    let actual_pts: Vec<(f64, f64)> = if time_range == TimeRange::Window {
+        rep.current
+            .iter()
+            .map(|s| (s.ts.timestamp() as f64, s.remaining * 100.0))
+            .collect()
+    } else {
+        rep.history
+            .iter()
+            .filter_map(|s| {
+                let x = s.ts.timestamp() as f64;
+                (x >= x_min && x <= x_max).then_some((x, s.remaining * 100.0))
+            })
+            .collect()
+    };
+
+    let is_5h = rep.window.eq_ignore_ascii_case("5h");
+    let show_boundaries = match time_range {
+        TimeRange::Window | TimeRange::H24 => true,
+        TimeRange::D7 | TimeRange::D30 | TimeRange::All => !is_5h,
+    };
+
+    let boundary_xs = if show_boundaries {
+        rep.boundaries
+            .iter()
+            .map(|b| b.timestamp() as f64)
+            .filter(|&bx| bx >= x_min && bx <= x_max)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Some(ChartViewport {
+        x_min,
+        x_max,
+        actual_pts,
+        boundary_xs,
+        show_boundaries,
+    })
 }
 
 fn format_window(win: &str) -> std::borrow::Cow<'_, str> {
@@ -91,13 +289,21 @@ pub fn draw(frame: &mut Frame, reports: &[BucketReport], state: &ViewState, now:
             ])
             .split(area);
 
-        draw_chart(frame, &reports[focus_idx], chunks[0], Some(focus_idx));
+        draw_chart(
+            frame,
+            &reports[focus_idx],
+            chunks[0],
+            Some(focus_idx),
+            state,
+            now,
+        );
         draw_table(
             frame,
             &reports[focus_idx..focus_idx + 1],
             chunks[1],
             now,
             Some(focus_idx),
+            state.clock,
         );
         draw_status_bar(frame, reports, state, chunks[2], now);
         return;
@@ -134,12 +340,19 @@ pub fn draw(frame: &mut Frame, reports: &[BucketReport], state: &ViewState, now:
         for (c_idx, c_chunk) in col_chunks.iter().enumerate() {
             let report_idx = r_idx * cols + c_idx;
             if report_idx < reports.len() {
-                draw_chart(frame, &reports[report_idx], *c_chunk, Some(report_idx));
+                draw_chart(
+                    frame,
+                    &reports[report_idx],
+                    *c_chunk,
+                    Some(report_idx),
+                    state,
+                    now,
+                );
             }
         }
     }
 
-    draw_table(frame, reports, chunks[1], now, None);
+    draw_table(frame, reports, chunks[1], now, None, state.clock);
     draw_status_bar(frame, reports, state, chunks[2], now);
 }
 
@@ -167,38 +380,72 @@ fn projection_points(rep: &BucketReport, reset_time: DateTime<Utc>) -> Vec<(f64,
     proj_pts
 }
 
-fn draw_chart(frame: &mut Frame, rep: &BucketReport, area: Rect, index: Option<usize>) {
+fn draw_chart(
+    frame: &mut Frame,
+    rep: &BucketReport,
+    area: Rect,
+    index: Option<usize>,
+    state: &ViewState,
+    now: DateTime<Utc>,
+) {
     if area.width < 4 || area.height < 3 {
         return;
     }
 
-    let title = if rep.prognosis.status == Status::Disabled {
+    let range_badge = if state.time_range != TimeRange::Window {
+        format!(" [{}]", state.time_range.label())
+    } else {
+        String::new()
+    };
+
+    let mut title = if rep.prognosis.status == Status::Disabled {
         if let Some(idx) = index {
             format!(
-                "[{}] {} · {}  disabled",
+                "[{}] {} · {}{}  disabled",
                 idx + 1,
                 rep.group,
                 format_window(&rep.window),
+                range_badge,
             )
         } else {
-            format!("{} · {}  disabled", rep.group, format_window(&rep.window),)
+            format!(
+                "{} · {}{}  disabled",
+                rep.group,
+                format_window(&rep.window),
+                range_badge,
+            )
         }
     } else if let Some(idx) = index {
         format!(
-            "[{}] {} · {}  {:.0}% left",
+            "[{}] {} · {}{}  {:.0}% left",
             idx + 1,
             rep.group,
             format_window(&rep.window),
+            range_badge,
             (rep.prognosis.remaining_now * 100.0).round()
         )
     } else {
         format!(
-            "{} · {}  {:.0}% left",
+            "{} · {}{}  {:.0}% left",
             rep.group,
             format_window(&rep.window),
+            range_badge,
             (rep.prognosis.remaining_now * 100.0).round()
         )
     };
+
+    if rep.prognosis.status != Status::Disabled
+        && let Some(rt) = rep.prognosis.reset_time
+    {
+        let inner_width = area.width.saturating_sub(2) as usize;
+        let full_suffix = format!(" · resets {}", format_reset_cell(rep, now, state.clock));
+        let compact_suffix = format!(" · resets {}", format_time_until(rt, now));
+        if title.width() + full_suffix.width() <= inner_width {
+            title.push_str(&full_suffix);
+        } else if title.width() + compact_suffix.width() <= inner_width {
+            title.push_str(&compact_suffix);
+        }
+    }
 
     if rep.prognosis.status == Status::Disabled {
         let inner_height = area.height.saturating_sub(2) as usize;
@@ -222,12 +469,10 @@ fn draw_chart(frame: &mut Frame, rep: &BucketReport, area: Rect, index: Option<u
         Some(rt) => rt,
         None => return,
     };
-
-    let actual_pts: Vec<(f64, f64)> = rep
-        .current
-        .iter()
-        .map(|s| (s.ts.timestamp() as f64, s.remaining * 100.0))
-        .collect();
+    let viewport = match chart_viewport(rep, state.time_range) {
+        Some(vp) => vp,
+        None => return,
+    };
 
     let budget_pts: Vec<(f64, f64)> = if let Some(ws) = rep.window_start {
         vec![
@@ -245,29 +490,29 @@ fn draw_chart(frame: &mut Frame, rep: &BucketReport, area: Rect, index: Option<u
         (reset_time.timestamp() as f64, 100.0),
     ];
 
-    let mut x_min = rep
-        .window_start
-        .map(|ws| ws.timestamp() as f64)
-        .unwrap_or_else(|| {
-            rep.history
-                .first()
-                .map(|s| s.ts.timestamp() as f64)
-                .unwrap_or(0.0)
-        });
-    let mut x_max = reset_time.timestamp() as f64;
-    if x_min >= x_max {
-        x_min = x_max - 3600.0;
-        x_max += 1.0;
-    }
+    let boundary_segments: Vec<[(f64, f64); 2]> = viewport
+        .boundary_xs
+        .iter()
+        .map(|&bx| [(bx, 0.0), (bx, 100.0)])
+        .collect();
 
     let x_axis = Axis::default()
-        .bounds([x_min, x_max])
+        .bounds([viewport.x_min, viewport.x_max])
         .style(Style::default().fg(Color::DarkGray));
     let y_axis = Axis::default()
         .bounds([0.0, 100.0])
         .style(Style::default().fg(Color::DarkGray));
 
     let mut datasets = Vec::new();
+    for seg in &boundary_segments {
+        datasets.push(
+            Dataset::default()
+                .marker(Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(Color::DarkGray))
+                .data(seg),
+        );
+    }
     if !budget_pts.is_empty() {
         datasets.push(
             Dataset::default()
@@ -278,14 +523,14 @@ fn draw_chart(frame: &mut Frame, rep: &BucketReport, area: Rect, index: Option<u
                 .data(&budget_pts),
         );
     }
-    if !actual_pts.is_empty() {
+    if !viewport.actual_pts.is_empty() {
         datasets.push(
             Dataset::default()
                 .name("Actual")
                 .marker(Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(Color::Cyan))
-                .data(&actual_pts),
+                .data(&viewport.actual_pts),
         );
     }
     if !proj_pts.is_empty() {
@@ -326,22 +571,29 @@ fn draw_table(
     area: Rect,
     now: DateTime<Utc>,
     focus_idx: Option<usize>,
+    clock: ClockFormat,
 ) {
     if area.width < 4 || area.height < 2 {
         return;
     }
 
-    let header = Row::new(vec![
+    let show_resets_col = area.width >= 110;
+
+    let mut header_cells = vec![
         Cell::from("Group"),
         Cell::from("Window"),
         Cell::from("Left"),
         Cell::from("Rate/h"),
         Cell::from("Budget/h"),
         Cell::from("Reset"),
-        Cell::from("Status"),
-        Cell::from("Sample"),
-    ])
-    .style(
+    ];
+    if show_resets_col {
+        header_cells.push(Cell::from("Resets"));
+    }
+    header_cells.push(Cell::from("Status"));
+    header_cells.push(Cell::from("Sample"));
+
+    let header = Row::new(header_cells).style(
         Style::default()
             .add_modifier(Modifier::BOLD)
             .fg(Color::Cyan),
@@ -379,29 +631,41 @@ fn draw_table(
                 rep.group.clone()
             };
 
-            Row::new(vec![
+            let mut row_cells = vec![
                 Cell::from(group_cell),
                 Cell::from(format_window(&rep.window)),
                 Cell::from(left_str),
                 Cell::from(rate_str),
                 Cell::from(budget_str),
                 Cell::from(reset_str),
-                Cell::from(status_str),
-                Cell::from(age_str),
-            ])
+            ];
+            if show_resets_col {
+                row_cells.push(Cell::from(format_reset_cell(rep, now, clock)));
+            }
+            row_cells.push(Cell::from(status_str));
+            row_cells.push(Cell::from(age_str));
+
+            Row::new(row_cells)
         })
         .collect();
 
-    let widths = [
+    let mut widths = vec![
         Constraint::Min(18),
         Constraint::Length(6),
         Constraint::Length(6),
         Constraint::Length(6),
         Constraint::Length(8),
         Constraint::Length(6),
-        Constraint::Length(15),
-        Constraint::Length(6),
     ];
+    if show_resets_col {
+        let resets_w = match clock {
+            ClockFormat::H24 => 18,
+            ClockFormat::H12 => 21,
+        };
+        widths.push(Constraint::Length(resets_w));
+    }
+    widths.push(Constraint::Length(15));
+    widths.push(Constraint::Length(6));
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -421,15 +685,24 @@ fn draw_status_bar(
         return;
     }
 
+    let range_hint = if state.time_range == TimeRange::Window {
+        "t: Range".to_string()
+    } else {
+        format!("t: Range ({})", state.time_range.label())
+    };
+
     let left_text = if state.is_once {
         format!(
             "agy-usage · {}",
             state.clock.format_datetime(&now.with_timezone(&Local))
         )
     } else if let Some(msg) = &state.message {
-        format!("msg: {} | Esc: Grid  1-9: Focus  r: Refresh  q: Quit", msg)
+        format!(
+            "msg: {} | Esc: Grid  1-9: Focus  {}  r: Refresh  q: Quit",
+            msg, range_hint
+        )
     } else {
-        "Esc: Grid  1-9: Focus  r: Refresh  q: Quit".to_string()
+        format!("Esc: Grid  1-9: Focus  {}  r: Refresh  q: Quit", range_hint)
     };
 
     let latest_sample = reports.iter().map(|r| r.prognosis.last_sample).max();
@@ -449,8 +722,8 @@ fn draw_status_bar(
         Color::DarkGray
     };
 
-    let left_len = left_text.len();
-    let right_len = right_text.len();
+    let left_len = left_text.width();
+    let right_len = right_text.width();
     let total_width = area.width as usize;
 
     let line = if left_len + right_len + 2 <= total_width {
@@ -700,15 +973,16 @@ fn reload_incremental(
     Some(crate::forecast::analyze(acc, tight))
 }
 
-pub fn run(data_dir: &Path, tight: f64, agy_bin: &str) -> Result<()> {
+pub fn run(data_dir: &Path, tight: f64, agy_bin: &str, clock: ClockFormat) -> Result<()> {
     let mut terminal = ratatui::try_init()?;
     let result = (|| -> Result<()> {
         let samples_path = data_dir.join("samples.jsonl");
         let mut last_reload = Instant::now() - StdDuration::from_secs(60);
         let mut reports: Vec<BucketReport> = Vec::new();
-        // The interactive view shows only relative times, so `state.clock` is
-        // unused here; plumb `--clock` through `run` before adding absolute ones.
-        let mut state = ViewState::default();
+        let mut state = ViewState {
+            clock,
+            ..Default::default()
+        };
         let mut cursor = crate::store::Cursor::default();
         let mut accumulated_samples: Vec<Sample> = Vec::new();
 
@@ -785,6 +1059,9 @@ pub fn run(data_dir: &Path, tight: f64, agy_bin: &str) -> Result<()> {
                 match key.code {
                     KeyCode::Esc => {
                         state.focus = None;
+                    }
+                    KeyCode::Char('t') | KeyCode::Char('w') => {
+                        state.time_range = state.time_range.next();
                     }
                     KeyCode::Char('r') => {
                         if is_refreshing {
@@ -1141,7 +1418,7 @@ mod tests {
             local.format("%Y-%m-%d %H:%M:%S")
         )));
         assert!(!text.contains("UTC"));
-        assert!(!text.contains("Esc: Grid  1-9: Focus  r: Refresh  q: Quit"));
+        assert!(!text.contains("Esc: Grid  1-9: Focus  t: Range  r: Refresh  q: Quit"));
     }
 
     #[test]
@@ -1180,7 +1457,7 @@ mod tests {
             text.push('\n');
         }
 
-        assert!(text.contains("Esc: Grid  1-9: Focus  r: Refresh  q: Quit"));
+        assert!(text.contains("Esc: Grid  1-9: Focus  t: Range  r: Refresh  q: Quit"));
     }
 
     #[test]
@@ -1329,7 +1606,7 @@ mod tests {
 
         terminal
             .draw(|f| {
-                draw_table(f, &reports, f.area(), now, None);
+                draw_table(f, &reports, f.area(), now, None, ClockFormat::H24);
             })
             .unwrap();
 
@@ -1448,8 +1725,9 @@ mod tests {
         // 2. Rendered chart verification: Green projection cells must appear in the chart buffer
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).unwrap();
+        let state = ViewState::default();
         terminal
-            .draw(|f| draw_chart(f, rep, f.area(), Some(0)))
+            .draw(|f| draw_chart(f, rep, f.area(), Some(0), &state, t2))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let has_green_projection = (0..20)
@@ -1469,7 +1747,7 @@ mod tests {
 
         let mut terminal_collecting = Terminal::new(TestBackend::new(80, 20)).unwrap();
         terminal_collecting
-            .draw(|f| draw_chart(f, &collecting_rep, f.area(), Some(0)))
+            .draw(|f| draw_chart(f, &collecting_rep, f.area(), Some(0), &state, t2))
             .unwrap();
         let buf_collecting = terminal_collecting.backend().buffer();
         let has_proj_when_collecting = (0..20)
@@ -1501,5 +1779,295 @@ mod tests {
             projection_points(exhausted_rep, reset).is_empty(),
             "exhausted bucket with empty_at == last_sample must not emit degenerate projection points"
         );
+    }
+
+    #[test]
+    fn format_time_until_and_reset_cell_variants() {
+        use chrono::FixedOffset;
+
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
+        assert_eq!(format_time_until(now, now), "now");
+        assert_eq!(
+            format_time_until(now - chrono::Duration::minutes(5), now),
+            "now"
+        );
+        assert_eq!(
+            format_time_until(now + chrono::Duration::seconds(45), now),
+            "in <1m"
+        );
+        assert_eq!(
+            format_time_until(now + chrono::Duration::minutes(42), now),
+            "in 42m"
+        );
+        assert_eq!(
+            format_time_until(now + chrono::Duration::hours(3), now),
+            "in 3h"
+        );
+        assert_eq!(
+            format_time_until(
+                now + chrono::Duration::hours(3) + chrono::Duration::minutes(15),
+                now
+            ),
+            "in 3h 15m"
+        );
+        assert_eq!(
+            format_time_until(now + chrono::Duration::days(2), now),
+            "in 2d"
+        );
+        assert_eq!(
+            format_time_until(
+                now + chrono::Duration::days(2) + chrono::Duration::hours(5),
+                now
+            ),
+            "in 2d 5h"
+        );
+
+        let tz = FixedOffset::east_opt(2 * 3600).unwrap();
+        let mut rep = make_test_reports()[0].clone();
+        rep.prognosis.reset_time =
+            Some(now + chrono::Duration::days(2) + chrono::Duration::hours(5));
+        rep.prognosis.status = Status::OnTrack;
+
+        assert_eq!(
+            format_reset_cell_with_tz(&rep, now, ClockFormat::H24, &tz),
+            "in 2d 5h (19:00)"
+        );
+        assert_eq!(
+            format_reset_cell_with_tz(&rep, now, ClockFormat::H12, &tz),
+            "in 2d 5h (07:00 PM)"
+        );
+
+        // Negative boundary: elapsed reset_time renders "now" without stale clock time
+        rep.prognosis.reset_time = Some(now - chrono::Duration::minutes(10));
+        assert_eq!(
+            format_reset_cell_with_tz(&rep, now, ClockFormat::H24, &tz),
+            "now"
+        );
+
+        // Negative boundary: Status::Disabled returns "—" even if reset_time is Some
+        rep.prognosis.reset_time = Some(now + chrono::Duration::hours(3));
+        rep.prognosis.status = Status::Disabled;
+        assert_eq!(
+            format_reset_cell_with_tz(&rep, now, ClockFormat::H24, &tz),
+            "—"
+        );
+
+        // Negative boundary: reset_time == None returns "—"
+        rep.prognosis.status = Status::Collecting;
+        rep.prognosis.reset_time = None;
+        assert_eq!(
+            format_reset_cell_with_tz(&rep, now, ClockFormat::H24, &tz),
+            "—"
+        );
+    }
+
+    #[test]
+    fn wide_table_renders_resets_column_while_80_col_preserves_invariant() {
+        let mut reports = make_test_reports();
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
+
+        // Wide 120x40 renders Resets column in both 24h and 12h formats
+        for clock in [ClockFormat::H24, ClockFormat::H12] {
+            let text_120 = render_plain(&reports, now, 120, 40, clock);
+            assert!(
+                text_120.contains("Resets"),
+                "expected Resets header in 120x40 table:\n{text_120}"
+            );
+            let expected_cell = format_reset_cell(&reports[0], now, clock);
+            assert!(
+                text_120.contains(&expected_cell),
+                "expected reset cell '{expected_cell}' in 120x40 table:\n{text_120}"
+            );
+        }
+
+        // Disabled bucket in wide table renders "—" in Resets column
+        reports[1].prognosis.status = Status::Disabled;
+        reports[1].prognosis.reset_time = None;
+        let text_dis = render_plain(&reports, now, 120, 40, ClockFormat::H24);
+        assert!(text_dis.contains("🚫 disabled"));
+
+        // Narrow 80x24 omits Resets table column to preserve 80-col invariant,
+        // while surfacing reset countdown & clock time in the 80-col chart title.
+        let text_80 = render_plain(&reports, now, 80, 24, ClockFormat::H24);
+        let expected_chart_reset = format!("resets {}", format_reset_cell(&reports[0], now, ClockFormat::H24));
+        assert!(
+            text_80.contains(&expected_chart_reset),
+            "expected 80-col chart title to contain '{expected_chart_reset}':\n{text_80}"
+        );
+    }
+
+    #[test]
+    fn time_range_cycles_through_all_variants() {
+        let r0 = TimeRange::default();
+        assert_eq!(r0, TimeRange::Window);
+        assert_eq!(r0.label(), "Window");
+
+        let r1 = r0.next();
+        assert_eq!(r1, TimeRange::H24);
+        assert_eq!(r1.label(), "24h");
+
+        let r2 = r1.next();
+        assert_eq!(r2, TimeRange::D7);
+        assert_eq!(r2.label(), "7d");
+
+        let r3 = r2.next();
+        assert_eq!(r3, TimeRange::D30);
+        assert_eq!(r3.label(), "30d");
+
+        let r4 = r3.next();
+        assert_eq!(r4, TimeRange::All);
+        assert_eq!(r4.label(), "All");
+
+        assert_eq!(r4.next(), TimeRange::Window);
+    }
+
+    #[test]
+    fn chart_viewport_filters_history_and_clamps_clock_skew() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 15, 12, 0, 0).unwrap();
+        let reset = now + chrono::Duration::days(5);
+        // Samples at -36h, -12h, -1h, and 0h on a weekly bucket
+        let samples = vec![
+            Sample {
+                ts: now - chrono::Duration::hours(36),
+                group: "Gemini Models".to_string(),
+                bucket_id: "gemini-weekly".to_string(),
+                window: "weekly".to_string(),
+                remaining: 0.95,
+                reset_time: Some(reset),
+                disabled: false,
+            },
+            Sample {
+                ts: now - chrono::Duration::hours(12),
+                group: "Gemini Models".to_string(),
+                bucket_id: "gemini-weekly".to_string(),
+                window: "weekly".to_string(),
+                remaining: 0.85,
+                reset_time: Some(reset),
+                disabled: false,
+            },
+            Sample {
+                ts: now - chrono::Duration::hours(1),
+                group: "Gemini Models".to_string(),
+                bucket_id: "gemini-weekly".to_string(),
+                window: "weekly".to_string(),
+                remaining: 0.80,
+                reset_time: Some(reset),
+                disabled: false,
+            },
+            Sample {
+                ts: now,
+                group: "Gemini Models".to_string(),
+                bucket_id: "gemini-weekly".to_string(),
+                window: "weekly".to_string(),
+                remaining: 0.78,
+                reset_time: Some(reset),
+                disabled: false,
+            },
+        ];
+        let rep = &analyze(&samples, 0.10)[0];
+
+        // H24 on a weekly bucket retains the 3 samples within the last 24h (-12h, -1h, 0h)
+        // and excludes the -36h sample.
+        let vp_24h = chart_viewport(rep, TimeRange::H24).unwrap();
+        assert_eq!(vp_24h.actual_pts.len(), 3);
+        assert_eq!(
+            vp_24h.actual_pts[0].0,
+            (now - chrono::Duration::hours(12)).timestamp() as f64
+        );
+
+        // D7 retains all 4 samples
+        let vp_7d = chart_viewport(rep, TimeRange::D7).unwrap();
+        assert_eq!(vp_7d.actual_pts.len(), 4);
+
+        // Clock skew: single sample earlier than window_start clamps x_min to last_sample
+        let skewed_sample = Sample {
+            ts: now - chrono::Duration::hours(10),
+            group: "Gemini Models".to_string(),
+            bucket_id: "gemini-5h".to_string(),
+            window: "5h".to_string(),
+            remaining: 0.90,
+            reset_time: Some(now + chrono::Duration::hours(5)),
+            disabled: false,
+        };
+        let skewed_rep = &analyze(&[skewed_sample.clone()], 0.10)[0];
+        let vp_win = chart_viewport(skewed_rep, TimeRange::Window).unwrap();
+        assert!(vp_win.x_min <= skewed_sample.ts.timestamp() as f64);
+    }
+
+    #[test]
+    fn chart_viewport_suppresses_5h_boundaries_above_48h_but_keeps_weekly() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 20, 12, 0, 0).unwrap();
+        let b_recent = now - chrono::Duration::hours(6);
+        let b_3d = now - chrono::Duration::days(3);
+
+        // 1. 5h bucket with boundaries at -3d and -6h
+        let mut rep_5h = make_test_reports()[1].clone();
+        rep_5h.window = "5h".to_string();
+        rep_5h.window_start = Some(now - chrono::Duration::hours(3));
+        rep_5h.prognosis.last_sample = now;
+        rep_5h.prognosis.reset_time = Some(now + chrono::Duration::hours(2));
+        rep_5h.boundaries = vec![b_3d, b_recent];
+
+        let vp_5h_24h = chart_viewport(&rep_5h, TimeRange::H24).unwrap();
+        assert!(vp_5h_24h.show_boundaries);
+        assert_eq!(vp_5h_24h.boundary_xs, vec![b_recent.timestamp() as f64]);
+
+        for wide in [TimeRange::D7, TimeRange::D30, TimeRange::All] {
+            let vp = chart_viewport(&rep_5h, wide).unwrap();
+            assert!(
+                !vp.show_boundaries,
+                "5h bucket must suppress boundaries on {:?}",
+                wide
+            );
+            assert!(vp.boundary_xs.is_empty());
+        }
+
+        // 2. Weekly bucket keeps boundaries on D7, D30, and All
+        let mut rep_weekly = make_test_reports()[0].clone();
+        rep_weekly.window = "weekly".to_string();
+        rep_weekly.window_start = Some(now - chrono::Duration::days(2));
+        rep_weekly.prognosis.last_sample = now;
+        rep_weekly.prognosis.reset_time = Some(now + chrono::Duration::days(5));
+        rep_weekly.boundaries = vec![b_3d, b_recent];
+
+        for wide in [TimeRange::D7, TimeRange::D30, TimeRange::All] {
+            let vp = chart_viewport(&rep_weekly, wide).unwrap();
+            assert!(
+                vp.show_boundaries,
+                "weekly bucket must preserve boundaries on {:?}",
+                wide
+            );
+            assert!(!vp.boundary_xs.is_empty());
+        }
+    }
+
+    #[test]
+    fn non_default_time_range_renders_in_chart_title_and_status_bar() {
+        let reports = make_test_reports();
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let state_24h = ViewState {
+            time_range: TimeRange::H24,
+            ..Default::default()
+        };
+        terminal
+            .draw(|f| draw(f, &reports, &state_24h, now))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..40 {
+            for x in 0..120 {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(text.contains("[1] Gemini Models · Weekly [24h]"));
+        assert!(text.contains("t: Range (24h)"));
+
+        // Negative boundary: default Window range omits [Window] badge from chart title
+        let text_default = render_plain(&reports, now, 120, 40, ClockFormat::H24);
+        assert!(!text_default.contains("[Window]"));
     }
 }

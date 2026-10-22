@@ -171,6 +171,7 @@
                         <th>Rate/h</th>
                         <th>Budget/h(safe)</th>
                         <th>At reset</th>
+                        <th>Resets</th>
                         <th>Status</th>
                         <th>Last sample</th>
                     </tr>
@@ -272,6 +273,32 @@
             return `${Math.floor(hr / 24)}d ago`;
         }
 
+        function formatTimeUntil(date, now) {
+            const nowMs = now != null ? now : Date.now();
+            const sec = Math.floor((date.getTime() - nowMs) / 1000);
+            if (isNaN(sec)) return '—';
+            if (sec <= 0) return 'now';
+            if (sec < 60) return 'in <1m';
+            if (sec < 3600) return `in ${Math.floor(sec / 60)}m`;
+            if (sec < 86400) {
+                const hr = Math.floor(sec / 3600);
+                const min = Math.floor((sec % 3600) / 60);
+                return min > 0 ? `in ${hr}h ${min}m` : `in ${hr}h`;
+            }
+            const d = Math.floor(sec / 86400);
+            const hr = Math.floor((sec % 86400) / 3600);
+            return hr > 0 ? `in ${d}d ${hr}h` : `in ${d}d`;
+        }
+
+        function formatResetCell(resetTime, isDisabled, now) {
+            if (isDisabled || !resetTime) return '—';
+            const rDate = new Date(resetTime);
+            if (isNaN(rDate.getTime())) return '—';
+            const nowMs = now != null ? now : Date.now();
+            if (Math.floor((rDate.getTime() - nowMs) / 1000) <= 0) return 'now';
+            return `${formatTimeUntil(rDate, nowMs)} (${rDate.toLocaleTimeString(undefined, TIME_OPTS)})`;
+        }
+
         const boundaryPlugin = {
             id: 'boundaries',
             beforeDraw: (chart) => {
@@ -331,6 +358,7 @@
                 const rateStr = (isDis || p.rate_per_h == null) ? '—' : `${(p.rate_per_h * 100).toFixed(2)}%/h`;
                 const safeStr = (isDis || p.safe_rate_per_h == null) ? '—' : `${(p.safe_rate_per_h * 100).toFixed(2)}%/h`;
                 const atResetStr = (isDis || p.at_reset == null) ? '—' : `${(p.at_reset * 100).toFixed(1)}%`;
+                const resetsStr = formatResetCell(rep.reset_time, isDis, Date.now());
                 const statusStr = statusLabel(p.status, p.empty_at, Date.now());
                 const lastDate = new Date(p.last_sample);
                 const lastSampleStr = `${lastDate.toLocaleTimeString(undefined, TIME_OPTS)} (${formatTimeAgo(lastDate)})`;
@@ -342,6 +370,7 @@
                     <td>${rateStr}</td>
                     <td>${safeStr}</td>
                     <td>${atResetStr}</td>
+                    <td>${escapeHtml(resetsStr)}</td>
                     <td>${statusStr}</td>
                     <td>${lastSampleStr}</td>
                 `;
@@ -583,11 +612,14 @@
                     if (!rep) return;
                     const p = rep.prognosis;
                     if (tr.cells[5]) {
-                        tr.cells[5].textContent = statusLabel(p.status, p.empty_at, now);
+                        tr.cells[5].textContent = formatResetCell(rep.reset_time, p.status === 'Disabled', now);
                     }
                     if (tr.cells[6]) {
+                        tr.cells[6].textContent = statusLabel(p.status, p.empty_at, now);
+                    }
+                    if (tr.cells[7]) {
                         const lDate = new Date(p.last_sample);
-                        tr.cells[6].textContent = `${lDate.toLocaleTimeString(undefined, TIME_OPTS)} (${formatTimeAgo(lDate)})`;
+                        tr.cells[7].textContent = `${lDate.toLocaleTimeString(undefined, TIME_OPTS)} (${formatTimeAgo(lDate)})`;
                     }
                 });
             }

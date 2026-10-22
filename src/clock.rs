@@ -51,6 +51,18 @@ impl ClockFormat {
         dt.format(pattern).to_string()
     }
 
+    /// Formats a short time of day in the given time zone using this clock format.
+    pub fn format_time<Tz: TimeZone>(self, dt: &DateTime<Tz>) -> String
+    where
+        Tz::Offset: Display,
+    {
+        let pattern = match self {
+            ClockFormat::H24 => "%H:%M",
+            ClockFormat::H12 => "%I:%M %p",
+        };
+        dt.format(pattern).to_string()
+    }
+
     /// The `--clock` CLI value for this format.
     pub fn as_arg(self) -> &'static str {
         match self {
@@ -292,6 +304,14 @@ mod tests {
             ClockFormat::H12.format_datetime(&dt),
             "2026-10-11 11:05:09 PM"
         );
+    }
+
+    #[test]
+    fn formats_time_per_clock() {
+        let tz = FixedOffset::east_opt(2 * 3600).unwrap();
+        let dt = tz.with_ymd_and_hms(2026, 10, 11, 23, 5, 9).unwrap();
+        assert_eq!(ClockFormat::H24.format_time(&dt), "23:05");
+        assert_eq!(ClockFormat::H12.format_time(&dt), "11:05 PM");
     }
 
     #[test]
