@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-22
+
+### Fixed
+- **Zero-Rate Burn Projections in TUI and HTML Dashboard**:
+  - Idle quota buckets with a computed `0.00%/h` burn rate (`rate_per_h == Some(0.0)`) now render their flat horizontal projection line to `reset_time` on both the terminal chart and web dashboard instead of omitting the projection dataset.
+  - Added a positive-span guard (`end_x > start_x`) so already-exhausted (`0.0%`) buckets with `empty_at == last_sample` do not emit degenerate zero-length projection segments.
+
+### Added
+- **Automated Release Metadata & Tag Guardrails**:
+  - Added `release_metadata_and_docs_stay_in_sync` integration test verifying `Cargo.toml`, `Cargo.lock`, `README.md`, and `CHANGELOG.md` stay synchronized on every test run.
+  - Added tag-version verification (`v${CARGO_PKG_VERSION}`) and locked formatting/Clippy checks to the GitHub Release workflow.
+
 ## [0.1.3] - 2026-10-14
 
 ### Changed
@@ -77,6 +89,7 @@ Initial release of `agy-usage`: quota history, burn-rate prognosis, and interact
   - Standalone, stripped Linux x86_64 binary archives with SHA-256 checksums published via automated GitHub Release workflow.
   - Automated one-line curl installation script (`install.sh`) with automated SHA-256 checksum verification.
 
+[0.1.4]: https://github.com/danieljov/agy-usage/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/danieljov/agy-usage/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/danieljov/agy-usage/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/danieljov/agy-usage/compare/v0.1.0...v0.1.1

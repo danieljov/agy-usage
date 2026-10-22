@@ -389,3 +389,193 @@ fn cli_lazy_pruning_on_collect() {
     assert_eq!(loaded.samples.len(), 4);
     assert!(!loaded.samples.iter().any(|s| s.bucket_id == "old_bucket"));
 }
+
+fn is_yyyy_mm_dd(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() == 10
+        && bytes[0..4].iter().all(u8::is_ascii_digit)
+        && bytes[4] == b'-'
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && bytes[7] == b'-'
+        && bytes[8..10].iter().all(u8::is_ascii_digit)
+}
+
+fn verify_release_sync(
+    ver: &str,
+    readme: &str,
+    changelog: &str,
+    cargo_lock: &str,
+) -> Result<(), String> {
+    let expected_url = format!(
+        "https://github.com/danieljov/agy-usage/releases/download/v{ver}/agy-usage-v{ver}-x86_64-unknown-linux-gnu.tar.gz"
+    );
+    if !readme.contains(&expected_url) {
+        return Err(format!(
+            "README.md is missing expected release tarball URL for v{ver}: {expected_url}"
+        ));
+    }
+
+    // Ensure no stale release download URLs or tarball filenames remain in README.md
+    for (idx, _) in readme.match_indices("releases/download/v") {
+        let after = &readme[idx + "releases/download/v".len()..];
+        let found_ver = after.split('/').next().unwrap_or("");
+        if found_ver != ver {
+            return Err(format!(
+                "README.md contains stale release version v{found_ver} (expected v{ver})"
+            ));
+        }
+    }
+    for (idx, _) in readme.match_indices("agy-usage-v") {
+        let after = &readme[idx + "agy-usage-v".len()..];
+        let found_ver = after.split("-x86_64").next().unwrap_or("");
+        if found_ver != ver {
+            return Err(format!(
+                "README.md contains stale tarball version v{found_ver} (expected v{ver})"
+            ));
+        }
+    }
+
+    let expected_header = format!("## [{ver}] - ");
+    let latest_release_line = changelog
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("## [") && *line != "## [Unreleased]");
+    match latest_release_line {
+        Some(line) if line.starts_with(&expected_header) => {
+            let date_part = &line[expected_header.len()..];
+            if !is_yyyy_mm_dd(date_part) {
+                return Err(format!(
+                    "CHANGELOG.md release header '{line}' does not have a valid YYYY-MM-DD date"
+                ));
+            }
+        }
+        _ => {
+            return Err(format!(
+                "CHANGELOG.md is missing release section header '{expected_header}<YYYY-MM-DD>' as latest release"
+            ));
+        }
+    }
+
+    let expected_link_prefix = format!("[{ver}]: https://github.com/danieljov/agy-usage/");
+    let has_matching_link = changelog.lines().map(str::trim).any(|line| {
+        line.starts_with(&expected_link_prefix)
+            && (line.ends_with(&format!("...v{ver}")) || line.ends_with(&format!("/v{ver}")))
+    });
+    if !has_matching_link {
+        return Err(format!(
+            "CHANGELOG.md is missing comparison/release link for [{ver}] ending with v{ver}"
+        ));
+    }
+
+    let expected_version_line = format!("version = \"{ver}\"");
+    let has_lock_entry = cargo_lock
+        .lines()
+        .zip(cargo_lock.lines().skip(1))
+        .any(|(l1, l2)| l1.trim() == "name = \"agy-usage\"" && l2.trim() == expected_version_line);
+    if !has_lock_entry {
+        return Err(format!(
+            "Cargo.lock version for agy-usage does not match Cargo.toml version {ver}"
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn release_metadata_and_docs_stay_in_sync() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let ver = env!("CARGO_PKG_VERSION");
+    let readme = fs::read_to_string(format!("{manifest_dir}/README.md")).unwrap();
+    let changelog = fs::read_to_string(format!("{manifest_dir}/CHANGELOG.md")).unwrap();
+    let cargo_lock = fs::read_to_string(format!("{manifest_dir}/Cargo.lock")).unwrap();
+
+    if let Err(err) = verify_release_sync(ver, &readme, &changelog, &cargo_lock) {
+        panic!("Release metadata out of sync with Cargo.toml (v{ver}): {err}");
+    }
+
+    // Negative boundary assertions: any forgotten file on a version bump must fail
+    let next_ver = "9.9.9";
+    assert!(
+        verify_release_sync(next_ver, &readme, &changelog, &cargo_lock)
+            .unwrap_err()
+            .contains("README.md is missing expected release tarball URL")
+    );
+
+    let updated_readme = readme.replace(&format!("v{ver}"), &format!("v{next_ver}"));
+    assert!(
+        verify_release_sync(next_ver, &updated_readme, &changelog, &cargo_lock)
+            .unwrap_err()
+            .contains("CHANGELOG.md is missing release section header")
+    );
+
+    let stale_readme = format!(
+        "{updated_readme}\nhttps://github.com/danieljov/agy-usage/releases/download/v0.1.0/agy-usage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz"
+    );
+    assert!(
+        verify_release_sync(next_ver, &stale_readme, &changelog, &cargo_lock)
+            .unwrap_err()
+            .contains("README.md contains stale release version v0.1.0")
+    );
+
+    let updated_changelog_no_link = changelog.replace(
+        "## [Unreleased]",
+        &format!("## [Unreleased]\n\n## [{next_ver}] - 2026-10-22"),
+    );
+    assert!(
+        verify_release_sync(
+            next_ver,
+            &updated_readme,
+            &updated_changelog_no_link,
+            &cargo_lock
+        )
+        .unwrap_err()
+        .contains("CHANGELOG.md is missing comparison/release link")
+    );
+
+    let updated_changelog_full = format!(
+        "{updated_changelog_no_link}\n[{next_ver}]: https://github.com/danieljov/agy-usage/compare/v{ver}...v{next_ver}\n"
+    );
+    assert!(
+        verify_release_sync(
+            next_ver,
+            &updated_readme,
+            &updated_changelog_full,
+            &cargo_lock
+        )
+        .unwrap_err()
+        .contains("Cargo.lock version for agy-usage does not match")
+    );
+
+    let updated_lock = cargo_lock.replace(
+        &format!("name = \"agy-usage\"\nversion = \"{ver}\""),
+        &format!("name = \"agy-usage\"\nversion = \"{next_ver}\""),
+    );
+    assert!(
+        verify_release_sync(
+            next_ver,
+            &updated_readme,
+            &updated_changelog_full,
+            &updated_lock
+        )
+        .is_ok()
+    );
+
+    // CRLF line endings in Cargo.lock are handled cleanly
+    let crlf_lock = updated_lock.replace('\n', "\r\n");
+    assert!(
+        verify_release_sync(
+            next_ver,
+            &updated_readme,
+            &updated_changelog_full,
+            &crlf_lock
+        )
+        .is_ok()
+    );
+
+    // Asymmetric desync: CHANGELOG.md bumped to 9.9.9 while Cargo.toml is still at current `ver`
+    assert!(
+        verify_release_sync(ver, &readme, &updated_changelog_full, &cargo_lock)
+            .unwrap_err()
+            .contains("CHANGELOG.md is missing release section header")
+    );
+}
