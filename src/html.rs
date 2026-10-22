@@ -459,6 +459,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn includes_zero_rate_projections_and_guards_degenerate_segments() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
+        let s1 = Sample {
+            ts: now - Duration::minutes(30),
+            group: "Claude and GPT models".to_string(),
+            bucket_id: "3p-weekly".to_string(),
+            window: "weekly".to_string(),
+            remaining: 0.70,
+            reset_time: Some(now + Duration::days(5)),
+            disabled: false,
+        };
+        let s2 = Sample {
+            ts: now,
+            remaining: 0.70,
+            ..s1.clone()
+        };
+        let reports = crate::forecast::analyze(&[s1, s2], 0.10);
+        assert_eq!(reports[0].prognosis.rate_per_h, Some(0.0));
+        assert_eq!(reports[0].prognosis.at_reset, Some(0.70));
+
+        let output = render(&reports, now, 30, ClockFormat::H24);
+        let val: serde_json::Value = serde_json::from_str(&extract_json(&output)).unwrap();
+        let prog = &val["reports"][0]["prognosis"];
+        assert_eq!(prog["rate_per_h"], 0.0);
+        assert_eq!(prog["at_reset"], 0.7);
+        assert!(prog["empty_at"].is_null());
+        assert_eq!(prog["status"], "OnTrack");
+
+        // Verify dashboard JS includes zero-rate projections (rate_per_h >= 0) and guards against 0-length segments
+        assert!(output.contains("if (p.rate_per_h != null && p.rate_per_h >= 0)"));
+        assert!(output.contains("if (endX > startX)"));
+        assert!(!output.contains("p.rate_per_h > 0"));
+    }
+
     fn extract_json(html: &str) -> String {
         let prefix = "const data = ";
         let start = html.find(prefix).expect("prefix not found") + prefix.len();
