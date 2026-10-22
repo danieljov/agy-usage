@@ -414,7 +414,7 @@
                 }
 
                 // Projection
-                if (p.rate_per_h != null && p.rate_per_h > 0) {
+                if (p.rate_per_h != null && p.rate_per_h >= 0) {
                     const startX = new Date(p.last_sample).getTime();
                     const startY = p.remaining_now * 100;
                     let endX, endY;
@@ -425,18 +425,20 @@
                         endX = new Date(p.reset_time).getTime();
                         endY = (p.at_reset || 0) * 100;
                     }
-                    const projColor = p.status === 'WillRunOut' ? '#ef4444' : (p.status === 'Tight' ? '#f59e0b' : '#10b981');
-                    datasets.push({
-                        label: 'Projection',
-                        data: [
-                            { x: startX, y: startY },
-                            { x: endX, y: endY }
-                        ],
-                        borderColor: projColor,
-                        borderWidth: 2,
-                        borderDash: [6, 4],
-                        pointRadius: 0,
-                    });
+                    if (endX > startX) {
+                        const projColor = p.status === 'WillRunOut' ? '#ef4444' : (p.status === 'Tight' ? '#f59e0b' : '#10b981');
+                        datasets.push({
+                            label: 'Projection',
+                            data: [
+                                { x: startX, y: startY },
+                                { x: endX, y: endY }
+                            ],
+                            borderColor: projColor,
+                            borderWidth: 2,
+                            borderDash: [6, 4],
+                            pointRadius: 0,
+                        });
+                    }
                 }
 
                 if (isDis) {

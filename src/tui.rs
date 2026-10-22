@@ -143,6 +143,30 @@ pub fn draw(frame: &mut Frame, reports: &[BucketReport], state: &ViewState, now:
     draw_status_bar(frame, reports, state, chunks[2], now);
 }
 
+fn projection_points(rep: &BucketReport, reset_time: DateTime<Utc>) -> Vec<(f64, f64)> {
+    let mut proj_pts: Vec<(f64, f64)> = Vec::new();
+    if let Some(_rate) = rep.prognosis.rate_per_h.filter(|&r| r >= 0.0) {
+        let start_x = rep.prognosis.last_sample.timestamp() as f64;
+        let start_y = rep.prognosis.remaining_now * 100.0;
+        let end_x = rep.prognosis.empty_at.unwrap_or(reset_time).timestamp() as f64;
+        if end_x > start_x {
+            let end_y = if rep.prognosis.empty_at.is_some() {
+                0.0
+            } else {
+                rep.prognosis.at_reset.unwrap_or(0.0) * 100.0
+            };
+
+            for i in 0..=30 {
+                let t = i as f64 / 30.0;
+                let x = start_x + t * (end_x - start_x);
+                let y = start_y + t * (end_y - start_y);
+                proj_pts.push((x, y));
+            }
+        }
+    }
+    proj_pts
+}
+
 fn draw_chart(frame: &mut Frame, rep: &BucketReport, area: Rect, index: Option<usize>) {
     if area.width < 4 || area.height < 3 {
         return;
@@ -214,24 +238,7 @@ fn draw_chart(frame: &mut Frame, rep: &BucketReport, area: Rect, index: Option<u
         Vec::new()
     };
 
-    let mut proj_pts: Vec<(f64, f64)> = Vec::new();
-    if let Some(_rate) = rep.prognosis.rate_per_h.filter(|&r| r > 0.0) {
-        let start_x = rep.prognosis.last_sample.timestamp() as f64;
-        let start_y = rep.prognosis.remaining_now * 100.0;
-        let end_x = rep.prognosis.empty_at.unwrap_or(reset_time).timestamp() as f64;
-        let end_y = if rep.prognosis.empty_at.is_some() {
-            0.0
-        } else {
-            rep.prognosis.at_reset.unwrap_or(0.0) * 100.0
-        };
-
-        for i in 0..=30 {
-            let t = i as f64 / 30.0;
-            let x = start_x + t * (end_x - start_x);
-            let y = start_y + t * (end_y - start_y);
-            proj_pts.push((x, y));
-        }
-    }
+    let proj_pts = projection_points(rep, reset_time);
 
     let reset_pts = vec![
         (reset_time.timestamp() as f64, 0.0),
@@ -1394,5 +1401,105 @@ mod tests {
         assert_eq!(cross_cell.symbol().width(), 2);
         assert_eq!(buffer[(59, 4)].symbol(), " ");
         assert_eq!(buffer[(60, 4)].symbol(), "i");
+    }
+
+    #[test]
+    fn zero_rate_projection_points_and_chart_rendering() {
+        let t1 = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 10, 11, 13, 0, 0).unwrap();
+        let reset = Utc.with_ymd_and_hms(2026, 10, 11, 17, 0, 0).unwrap();
+        let samples = vec![
+            Sample {
+                ts: t1,
+                group: "Claude and GPT models".to_string(),
+                bucket_id: "3p-weekly".to_string(),
+                window: "weekly".to_string(),
+                remaining: 0.70,
+                reset_time: Some(reset),
+                disabled: false,
+            },
+            Sample {
+                ts: t2,
+                group: "Claude and GPT models".to_string(),
+                bucket_id: "3p-weekly".to_string(),
+                window: "weekly".to_string(),
+                remaining: 0.70,
+                reset_time: Some(reset),
+                disabled: false,
+            },
+        ];
+        let reports = analyze(&samples, 0.10);
+        assert_eq!(reports.len(), 1);
+        let rep = &reports[0];
+        assert_eq!(rep.prognosis.rate_per_h, Some(0.0));
+        assert_eq!(rep.prognosis.at_reset, Some(0.70));
+        assert_eq!(rep.prognosis.empty_at, None);
+        assert_eq!(rep.prognosis.status, Status::OnTrack);
+
+        // 1. Direct dataset coordinate verification: flat horizontal projection from t2 to reset
+        let pts = projection_points(rep, reset);
+        assert_eq!(pts.len(), 31);
+        assert_eq!(pts.first().copied(), Some((t2.timestamp() as f64, 70.0)));
+        assert_eq!(pts.last().copied(), Some((reset.timestamp() as f64, 70.0)));
+        for &(_x, y) in &pts {
+            assert!((y - 70.0).abs() < 1e-9, "expected flat y=70.0, got {y}");
+        }
+
+        // 2. Rendered chart verification: Green projection cells must appear in the chart buffer
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| draw_chart(f, rep, f.area(), Some(0)))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let has_green_projection = (0..20)
+            .flat_map(|y| (0..80).map(move |x| &buffer[(x, y)]))
+            .any(|cell| cell.fg == Color::Green);
+        assert!(
+            has_green_projection,
+            "expected Green projection braille cells in chart when rate_per_h == Some(0.0)"
+        );
+
+        // 3. Negative boundary: Status::Collecting (rate_per_h == None) omits projection
+        let mut collecting_rep = rep.clone();
+        collecting_rep.prognosis.rate_per_h = None;
+        collecting_rep.prognosis.at_reset = None;
+        collecting_rep.prognosis.status = Status::Collecting;
+        assert!(projection_points(&collecting_rep, reset).is_empty());
+
+        let mut terminal_collecting = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal_collecting
+            .draw(|f| draw_chart(f, &collecting_rep, f.area(), Some(0)))
+            .unwrap();
+        let buf_collecting = terminal_collecting.backend().buffer();
+        let has_proj_when_collecting = (0..20)
+            .flat_map(|y| (0..80).map(move |x| &buf_collecting[(x, y)]))
+            .any(|cell| matches!(cell.fg, Color::Green | Color::Yellow | Color::Red));
+        assert!(
+            !has_proj_when_collecting,
+            "Status::Collecting must not render a projection line"
+        );
+
+        // 4. Negative boundary: Exhausted bucket at 0% (empty_at == Some(last_sample)) omits degenerate 0-length projection
+        let exhausted_samples = vec![
+            Sample {
+                ts: t1,
+                remaining: 0.0,
+                ..samples[0].clone()
+            },
+            Sample {
+                ts: t2,
+                remaining: 0.0,
+                ..samples[1].clone()
+            },
+        ];
+        let exhausted_reports = analyze(&exhausted_samples, 0.10);
+        let exhausted_rep = &exhausted_reports[0];
+        assert_eq!(exhausted_rep.prognosis.rate_per_h, Some(0.0));
+        assert_eq!(exhausted_rep.prognosis.empty_at, Some(t2));
+        assert!(
+            projection_points(exhausted_rep, reset).is_empty(),
+            "exhausted bucket with empty_at == last_sample must not emit degenerate projection points"
+        );
     }
 }
