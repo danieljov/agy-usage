@@ -648,6 +648,9 @@ fn release_workflow_configures_idempotent_crates_io_publish() {
     assert!(workflow.contains("already uploaded|already exists"));
     assert!(workflow.contains("CARGO_REGISTRY_TOKEN"));
     assert!(workflow.contains("rust-lang/crates-io-auth-action@v1"));
+    assert!(workflow.contains("steps.crates-check.outputs.has_token != 'true'"));
+    assert!(workflow.contains("PKG_VER: ${{ steps.crates-check.outputs.pkg_ver }}"));
+    assert!(!workflow.contains("PKG_VER=\"${{"));
 
     // README documents --version, TUI range keybinding, and crates.io release setup
     assert!(readme.contains("-V, --version"));

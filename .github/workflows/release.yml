@@ -70,8 +70,15 @@ jobs:
 
       - name: Clean up release artifacts and check crates.io index
         id: crates-check
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           rm -rf agy-usage-*
+          if [ -n "${CARGO_REGISTRY_TOKEN}" ]; then
+            echo "has_token=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_token=false" >> "${GITHUB_OUTPUT}"
+          fi
           PKG_VER=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "agy-usage") | .version')
           echo "pkg_ver=${PKG_VER}" >> "${GITHUB_OUTPUT}"
           if curl -fsSL "https://index.crates.io/ag/y-/agy-usage" 2>/dev/null | jq -e --arg v "${PKG_VER}" 'select(.vers == $v)' >/dev/null 2>&1; then
@@ -83,9 +90,7 @@ jobs:
 
       - name: Authenticate with crates.io (Trusted Publishing)
         id: crates-auth
-        if: steps.crates-check.outputs.already_published != 'true' && env.CARGO_REGISTRY_TOKEN == ''
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        if: steps.crates-check.outputs.already_published != 'true' && steps.crates-check.outputs.has_token != 'true'
         uses: rust-lang/crates-io-auth-action@v1
         continue-on-error: true
 
@@ -93,8 +98,8 @@ jobs:
         if: steps.crates-check.outputs.already_published != 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN || steps.crates-auth.outputs.token }}
+          PKG_VER: ${{ steps.crates-check.outputs.pkg_ver }}
         run: |
-          PKG_VER="${{ steps.crates-check.outputs.pkg_ver }}"
           if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
             echo "::error::Neither CARGO_REGISTRY_TOKEN secret nor Crates.io Trusted Publishing token is available"
             exit 1
