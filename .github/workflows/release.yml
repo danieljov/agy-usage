@@ -19,9 +19,25 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+
+      - name: Verify tag matches Cargo.toml
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          PKG_VER=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "agy-usage") | .version')
+          if [ "${TAG}" != "v${PKG_VER}" ]; then
+            echo "::error::Git tag '${TAG}' does not match Cargo.toml version 'v${PKG_VER}'"
+            exit 1
+          fi
+
+      - name: Check formatting and lints
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
 
       - name: Run test suite
         run: cargo test --release --locked
