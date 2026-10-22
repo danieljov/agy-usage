@@ -579,3 +579,82 @@ fn release_metadata_and_docs_stay_in_sync() {
             .contains("CHANGELOG.md is missing release section header")
     );
 }
+
+#[test]
+fn cli_version_flags() {
+    let bin_path = env!("CARGO_BIN_EXE_agy-usage");
+    let expected = format!("agy-usage {}\n", env!("CARGO_PKG_VERSION"));
+
+    for flag in ["--version", "-V"] {
+        let out = Command::new(bin_path)
+            .arg(flag)
+            .env_remove("HOME")
+            .env_remove("XDG_DATA_HOME")
+            .output()
+            .expect("failed to execute agy-usage with version flag");
+        assert!(
+            out.status.success(),
+            "expected {flag} to succeed, stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
+        assert!(
+            out.stderr.is_empty(),
+            "expected empty stderr for {flag}, got: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn release_workflow_configures_idempotent_crates_io_publish() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workflow =
+        fs::read_to_string(format!("{manifest_dir}/.github/workflows/release.yml")).unwrap();
+    let readme = fs::read_to_string(format!("{manifest_dir}/README.md")).unwrap();
+
+    // OIDC Trusted Publishing permission alongside contents: write
+    assert!(workflow.contains("contents: write"));
+    assert!(workflow.contains("id-token: write"));
+
+    // Verify step ordering: tag check -> lints -> tests -> GitHub release -> tarball cleanup -> cargo publish
+    let idx_tag_check = workflow
+        .find("Verify tag matches Cargo.toml")
+        .expect("missing tag check step");
+    let idx_lints = workflow
+        .find("Check formatting and lints")
+        .expect("missing lints step");
+    let idx_tests = workflow
+        .find("Run test suite")
+        .expect("missing test suite step");
+    let idx_gh_release = workflow
+        .find("Upload to GitHub Release")
+        .expect("missing GitHub Release step");
+    let idx_cleanup = workflow
+        .find("rm -rf agy-usage-")
+        .expect("missing tarball cleanup before cargo publish");
+    let idx_publish = workflow
+        .find("cargo publish --locked")
+        .expect("missing cargo publish --locked command");
+
+    assert!(idx_tag_check < idx_lints);
+    assert!(idx_lints < idx_tests);
+    assert!(idx_tests < idx_gh_release);
+    assert!(idx_gh_release < idx_cleanup);
+    assert!(idx_cleanup < idx_publish);
+
+    // Sparse index check and already-uploaded fallback for idempotency
+    assert!(workflow.contains("https://index.crates.io/ag/y-/agy-usage"));
+    assert!(workflow.contains("already uploaded|already exists"));
+    assert!(workflow.contains("CARGO_REGISTRY_TOKEN"));
+    assert!(workflow.contains("rust-lang/crates-io-auth-action@v1"));
+    assert!(workflow.contains("steps.crates-check.outputs.has_token != 'true'"));
+    assert!(workflow.contains("PKG_VER: ${{ steps.crates-check.outputs.pkg_ver }}"));
+    assert!(!workflow.contains("PKG_VER=\"${{"));
+
+    // README documents --version, TUI range keybinding, and crates.io release setup
+    assert!(readme.contains("-V, --version"));
+    assert!(readme.contains("`t`") || readme.contains("`w`"));
+    assert!(readme.contains("CARGO_REGISTRY_TOKEN"));
+    assert!(readme.contains("Trusted Publishing"));
+}

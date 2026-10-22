@@ -494,6 +494,37 @@ mod tests {
         assert!(!output.contains("p.rate_per_h > 0"));
     }
 
+    #[test]
+    fn dashboard_renders_and_refreshes_reset_countdown_and_clock_time() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
+        let output = render(&[], now, 30, ClockFormat::H24);
+
+        // Table header includes Resets column between At reset and Status
+        assert!(
+            output.contains("<th>At reset</th>\n                        <th>Resets</th>\n                        <th>Status</th>"),
+            "missing Resets table header column"
+        );
+
+        // Helpers for relative countdown and clock-format-aware reset cell
+        assert!(output.contains("function formatTimeUntil("));
+        assert!(output.contains("function formatResetCell("));
+        assert!(output.contains("rDate.toLocaleTimeString(undefined, TIME_OPTS)"));
+
+        // Negative boundary: disabled or missing reset_time returns '—'
+        assert!(output.contains("if (isDisabled || !resetTime) return '—';"));
+
+        // Initial row rendering & periodic refresh in updateRelativeTimes()
+        assert!(
+            output
+                .contains("const resetsStr = formatResetCell(rep.reset_time, isDis, Date.now());")
+        );
+        assert!(output.contains("tr.cells[5].textContent = formatResetCell(rep.reset_time, p.status === 'Disabled', now);"));
+        assert!(
+            output.contains("tr.cells[6].textContent = statusLabel(p.status, p.empty_at, now);")
+        );
+        assert!(output.contains("tr.cells[7].textContent = `${lDate.toLocaleTimeString(undefined, TIME_OPTS)} (${formatTimeAgo(lDate)})`;"));
+    }
+
     fn extract_json(html: &str) -> String {
         let prefix = "const data = ";
         let start = html.find(prefix).expect("prefix not found") + prefix.len();
