@@ -514,9 +514,14 @@ mod tests {
         assert!(output.contains("if (isDisabled || !resetTime) return '—';"));
 
         // Initial row rendering & periodic refresh in updateRelativeTimes()
-        assert!(output.contains("const resetsStr = formatResetCell(rep.reset_time, isDis, Date.now());"));
+        assert!(
+            output
+                .contains("const resetsStr = formatResetCell(rep.reset_time, isDis, Date.now());")
+        );
         assert!(output.contains("tr.cells[5].textContent = formatResetCell(rep.reset_time, p.status === 'Disabled', now);"));
-        assert!(output.contains("tr.cells[6].textContent = statusLabel(p.status, p.empty_at, now);"));
+        assert!(
+            output.contains("tr.cells[6].textContent = statusLabel(p.status, p.empty_at, now);")
+        );
         assert!(output.contains("tr.cells[7].textContent = `${lDate.toLocaleTimeString(undefined, TIME_OPTS)} (${formatTimeAgo(lDate)})`;"));
     }
 

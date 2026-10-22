@@ -605,3 +605,53 @@ fn cli_version_flags() {
         );
     }
 }
+
+#[test]
+fn release_workflow_configures_idempotent_crates_io_publish() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workflow =
+        fs::read_to_string(format!("{manifest_dir}/.github/workflows/release.yml")).unwrap();
+    let readme = fs::read_to_string(format!("{manifest_dir}/README.md")).unwrap();
+
+    // OIDC Trusted Publishing permission alongside contents: write
+    assert!(workflow.contains("contents: write"));
+    assert!(workflow.contains("id-token: write"));
+
+    // Verify step ordering: tag check -> lints -> tests -> GitHub release -> tarball cleanup -> cargo publish
+    let idx_tag_check = workflow
+        .find("Verify tag matches Cargo.toml")
+        .expect("missing tag check step");
+    let idx_lints = workflow
+        .find("Check formatting and lints")
+        .expect("missing lints step");
+    let idx_tests = workflow
+        .find("Run test suite")
+        .expect("missing test suite step");
+    let idx_gh_release = workflow
+        .find("Upload to GitHub Release")
+        .expect("missing GitHub Release step");
+    let idx_cleanup = workflow
+        .find("rm -rf agy-usage-")
+        .expect("missing tarball cleanup before cargo publish");
+    let idx_publish = workflow
+        .find("cargo publish --locked")
+        .expect("missing cargo publish --locked command");
+
+    assert!(idx_tag_check < idx_lints);
+    assert!(idx_lints < idx_tests);
+    assert!(idx_tests < idx_gh_release);
+    assert!(idx_gh_release < idx_cleanup);
+    assert!(idx_cleanup < idx_publish);
+
+    // Sparse index check and already-uploaded fallback for idempotency
+    assert!(workflow.contains("https://index.crates.io/ag/y-/agy-usage"));
+    assert!(workflow.contains("already uploaded|already exists"));
+    assert!(workflow.contains("CARGO_REGISTRY_TOKEN"));
+    assert!(workflow.contains("rust-lang/crates-io-auth-action@v1"));
+
+    // README documents --version, TUI range keybinding, and crates.io release setup
+    assert!(readme.contains("-V, --version"));
+    assert!(readme.contains("`t`") || readme.contains("`w`"));
+    assert!(readme.contains("CARGO_REGISTRY_TOKEN"));
+    assert!(readme.contains("Trusted Publishing"));
+}

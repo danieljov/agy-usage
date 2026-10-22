@@ -1889,7 +1889,10 @@ mod tests {
         // Narrow 80x24 omits Resets table column to preserve 80-col invariant,
         // while surfacing reset countdown & clock time in the 80-col chart title.
         let text_80 = render_plain(&reports, now, 80, 24, ClockFormat::H24);
-        let expected_chart_reset = format!("resets {}", format_reset_cell(&reports[0], now, ClockFormat::H24));
+        let expected_chart_reset = format!(
+            "resets {}",
+            format_reset_cell(&reports[0], now, ClockFormat::H24)
+        );
         assert!(
             text_80.contains(&expected_chart_reset),
             "expected 80-col chart title to contain '{expected_chart_reset}':\n{text_80}"
@@ -1989,7 +1992,7 @@ mod tests {
             reset_time: Some(now + chrono::Duration::hours(5)),
             disabled: false,
         };
-        let skewed_rep = &analyze(&[skewed_sample.clone()], 0.10)[0];
+        let skewed_rep = &analyze(std::slice::from_ref(&skewed_sample), 0.10)[0];
         let vp_win = chart_viewport(skewed_rep, TimeRange::Window).unwrap();
         assert!(vp_win.x_min <= skewed_sample.ts.timestamp() as f64);
     }

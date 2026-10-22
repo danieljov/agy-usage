@@ -107,6 +107,7 @@ cargo install --path .
 ## TUI Controls
 
 - `r`: Collect fresh samples now and refresh
+- `t` (or `w`): Cycle chart time range (`Window` → `24h` → `7d` → `30d` → `All`)
 - `1`–`9`: Focus a single quota bucket full-screen
 - `Esc`: Return to 2-column grid view
 - `q` or `Ctrl-C`: Quit
@@ -131,6 +132,7 @@ Options:
       --retention-days <RETENTION_DAYS>    Days of raw samples to keep on disk [default: max(90, --history-days)]
       --clock <CLOCK>                      Clock format for displayed times [default: auto] [possible values: auto, 12h, 24h]
   -h, --help                               Print help
+  -V, --version                            Print version
 ```
 
 ## Time Format
@@ -145,6 +147,14 @@ Displayed times (TUI header, HTML dashboard header, table, chart axes and toolti
 - **Atomic Lazy Pruning:** During collection, `agy-usage` checks if the oldest sample exceeds the retention threshold plus a 1-day buffer, performing at most one atomic rewrite per day. File mutations and rewrites coordinate via a sidecar lock (`samples.lock`) to ensure zero lost writes during concurrent appends.
 - **Offline HTML:** Generated HTML dashboards vendor Chart.js and date adapters locally with zero external network requests.
 - **Timer Propagation:** Re-running `agy-usage --retention-days <N> install-timer` automatically propagates configured threshold, history, and retention settings into the systemd user service unit. An explicit `--clock 12h|24h` is propagated too; `auto` is left out so the timer keeps following the system setting.
+
+## Releasing & Crates.io Publishing
+
+Pushing a version tag (`v*` matching `Cargo.toml`) triggers `.github/workflows/release.yml`, which verifies formatting, lints, tests, and tag-version alignment, uploads the Linux `x86_64` binary tarball to GitHub Releases, and idempotently publishes the crate to crates.io.
+
+Authentication with crates.io supports two setups:
+1. **Crates.io Trusted Publishing (Recommended):** Configure `danieljov/agy-usage` (workflow `release.yml`) as a Trusted Publisher in your crate settings on crates.io (uses GitHub OIDC `id-token: write` via `rust-lang/crates-io-auth-action@v1`).
+2. **Repository Secret Fallback:** Add a crates.io API token as `CARGO_REGISTRY_TOKEN` under GitHub repository `Settings → Secrets and variables → Actions`.
 
 ## License
 
