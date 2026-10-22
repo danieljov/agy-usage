@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[derive(Parser)]
 #[command(
     name = "agy-usage",
+    version,
     about = "Antigravity quota usage tracker and prognosis"
 )]
 struct Cli {

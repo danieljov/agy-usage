@@ -579,3 +579,29 @@ fn release_metadata_and_docs_stay_in_sync() {
             .contains("CHANGELOG.md is missing release section header")
     );
 }
+
+#[test]
+fn cli_version_flags() {
+    let bin_path = env!("CARGO_BIN_EXE_agy-usage");
+    let expected = format!("agy-usage {}\n", env!("CARGO_PKG_VERSION"));
+
+    for flag in ["--version", "-V"] {
+        let out = Command::new(bin_path)
+            .arg(flag)
+            .env_remove("HOME")
+            .env_remove("XDG_DATA_HOME")
+            .output()
+            .expect("failed to execute agy-usage with version flag");
+        assert!(
+            out.status.success(),
+            "expected {flag} to succeed, stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
+        assert!(
+            out.stderr.is_empty(),
+            "expected empty stderr for {flag}, got: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
