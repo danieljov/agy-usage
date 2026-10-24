@@ -98,6 +98,7 @@ pub fn window_boundaries(samples: &[Sample]) -> Vec<usize> {
         let prev = &samples[i - 1];
         let curr = &samples[i];
         let quota_increased = curr.remaining > prev.remaining + 0.005;
+        let large_quota_jump = curr.remaining > prev.remaining + 0.10;
         let reset_moved = match (curr.reset_time, prev.reset_time) {
             (Some(c), Some(p)) => c > p + Duration::seconds(60),
             _ => false,
@@ -107,7 +108,10 @@ pub fn window_boundaries(samples: &[Sample]) -> Vec<usize> {
             None => false,
         };
         let disabled_changed = prev.disabled != curr.disabled;
-        if quota_increased || (reset_moved && reset_expired) || disabled_changed {
+        if (reset_moved && (reset_expired || quota_increased))
+            || large_quota_jump
+            || disabled_changed
+        {
             boundaries.push(i);
         }
     }
@@ -633,6 +637,149 @@ mod tests {
         let samples = vec![s(0, 0.40, None), s(15, 0.38, None), s(30, 1.00, None)];
         let bounds = window_boundaries(&samples);
         assert_eq!(bounds, vec![2]);
+    }
+
+    #[test]
+    fn mid_window_reconciliation_not_boundary_and_preserves_current() {
+        let t0 = base_time();
+        let reset_w = t0 + Duration::days(6);
+        let mk_weekly = |min_offset: i64, remaining: f64| Sample {
+            ts: t0 + Duration::minutes(min_offset),
+            group: "Gemini Models".to_string(),
+            bucket_id: "gemini-weekly".to_string(),
+            window: "weekly".to_string(),
+            remaining,
+            reset_time: Some(reset_w),
+            disabled: false,
+        };
+
+        // Steady burn with mid-window backend quota reconciliations (+0.6%, +0.71%, +1.85%)
+        // while reset_time remains identical.
+        let samples = vec![
+            mk_weekly(0, 0.9200),
+            mk_weekly(60, 0.9071),
+            mk_weekly(65, 0.9132), // +0.61% reconciliation
+            mk_weekly(120, 0.8562),
+            mk_weekly(125, 0.8619), // +0.57% reconciliation
+            mk_weekly(150, 0.8458),
+            mk_weekly(155, 0.8530), // +0.72% reconciliation
+            mk_weekly(180, 0.8300),
+            mk_weekly(185, 0.8485), // +1.85% reconciliation
+            mk_weekly(240, 0.8200),
+        ];
+
+        assert!(window_boundaries(&samples).is_empty());
+
+        let reports = analyze(&samples, 0.10);
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].boundaries.is_empty());
+        assert_eq!(reports[0].current.len(), samples.len());
+        assert!(reports[0].prognosis.rate_per_h.unwrap() > 0.02);
+    }
+
+    #[test]
+    fn early_reset_with_advanced_reset_time_is_boundary() {
+        let reset_initial = base_time() + Duration::hours(5);
+        let reset_advanced = reset_initial + Duration::minutes(38);
+        let samples = vec![
+            s(0, 0.98, Some(reset_initial)),
+            s(15, 0.9698, Some(reset_initial)),
+            // Early reset before reset_initial expires: remaining increases by +2.98%
+            // and reset_time advances by >60s.
+            s(20, 0.9996, Some(reset_advanced)),
+            s(35, 0.9850, Some(reset_advanced)),
+        ];
+        let bounds = window_boundaries(&samples);
+        assert_eq!(bounds, vec![2]);
+    }
+
+    #[test]
+    fn large_quota_jump_with_unchanged_or_none_reset_time_is_boundary() {
+        let reset = base_time() + Duration::hours(5);
+        let unchanged_some = vec![
+            s(0, 0.45, Some(reset)),
+            s(15, 0.40, Some(reset)),
+            s(30, 1.00, Some(reset)),
+        ];
+        assert_eq!(window_boundaries(&unchanged_some), vec![2]);
+
+        let none_reset = vec![
+            Sample {
+                ts: base_time(),
+                group: "Custom".to_string(),
+                bucket_id: "custom-1".to_string(),
+                window: "5h".to_string(),
+                remaining: 0.40,
+                reset_time: None,
+                disabled: false,
+            },
+            Sample {
+                ts: base_time() + Duration::minutes(15),
+                group: "Custom".to_string(),
+                bucket_id: "custom-1".to_string(),
+                window: "5h".to_string(),
+                remaining: 0.41, // +1.0% minor reconciliation with None reset_time -> not a boundary
+                reset_time: None,
+                disabled: false,
+            },
+            Sample {
+                ts: base_time() + Duration::minutes(30),
+                group: "Custom".to_string(),
+                bucket_id: "custom-1".to_string(),
+                window: "5h".to_string(),
+                remaining: 1.00, // +59% refill jump with None reset_time -> boundary
+                reset_time: None,
+                disabled: false,
+            },
+        ];
+        assert_eq!(window_boundaries(&none_reset), vec![2]);
+    }
+
+    #[test]
+    fn window_boundary_threshold_invariants_and_disabled_transitions() {
+        let reset = base_time() + Duration::hours(5);
+
+        // 1. Clock jitter <= 60s with +2% reconciliation is NOT a boundary,
+        //    whereas > 60s (+61s) with +2% IS a boundary.
+        let jitter_60s = vec![
+            s(0, 0.80, Some(reset)),
+            s(5, 0.82, Some(reset + Duration::seconds(60))),
+        ];
+        assert!(window_boundaries(&jitter_60s).is_empty());
+
+        let advance_61s = vec![
+            s(0, 0.80, Some(reset)),
+            s(5, 0.82, Some(reset + Duration::seconds(61))),
+        ];
+        assert_eq!(window_boundaries(&advance_61s), vec![1]);
+
+        // 2. With reset_moved = true and not expired, <= +0.5% (+0.4%) is NOT a boundary,
+        //    whereas > +0.5% (+0.6%) IS a boundary.
+        let moved_reset = reset + Duration::minutes(30);
+        let sub_half_pct = vec![s(0, 0.800, Some(reset)), s(5, 0.804, Some(moved_reset))];
+        assert!(window_boundaries(&sub_half_pct).is_empty());
+
+        let above_half_pct = vec![s(0, 0.800, Some(reset)), s(5, 0.806, Some(moved_reset))];
+        assert_eq!(window_boundaries(&above_half_pct), vec![1]);
+
+        // 3. With reset_moved = false, <= +10% (+9.5%) is NOT a boundary,
+        //    whereas > +10% (+10.5%) IS a boundary.
+        let jump_9_5_pct = vec![s(0, 0.400, Some(reset)), s(5, 0.495, Some(reset))];
+        assert!(window_boundaries(&jump_9_5_pct).is_empty());
+
+        let jump_10_5_pct = vec![s(0, 0.400, Some(reset)), s(5, 0.505, Some(reset))];
+        assert_eq!(window_boundaries(&jump_10_5_pct), vec![1]);
+
+        // 4. Disabled state transitions (false -> true -> false) are boundaries
+        //    even without quota increase or reset_time movement.
+        let mut s_disabled = s(5, 0.50, Some(reset));
+        s_disabled.disabled = true;
+        let disabled_flip = vec![
+            s(0, 0.50, Some(reset)),
+            s_disabled,
+            s(10, 0.50, Some(reset)),
+        ];
+        assert_eq!(window_boundaries(&disabled_flip), vec![1, 2]);
     }
 
     #[test]
