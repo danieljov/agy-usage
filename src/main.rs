@@ -137,8 +137,9 @@ fn write_html_atomic(path: &Path, content: &str) -> Result<()> {
 
 /// Loads only the samples needed to display `history_days` of history (see
 /// [`agy_usage::forecast::analysis_cutoff`]) and analyzes them. Falls back to the full
-/// history when a bucket has a window of unknown length, whose prognosis can depend on
-/// arbitrarily old samples.
+/// history when a bucket sampled since the cutoff has a window of unknown length, whose
+/// prognosis can depend on arbitrarily old samples. Buckets with no samples since the
+/// cutoff are stale and omitted regardless of window type.
 fn load_reports(
     samples_path: &Path,
     now: chrono::DateTime<Utc>,

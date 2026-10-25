@@ -310,6 +310,10 @@ pub fn analysis_cutoff(now: DateTime<Utc>, history_days: u32) -> DateTime<Utc> {
 /// [`analyze_since`]. Buckets whose window length is unknown (see [`window_length`])
 /// have no bounded lookback, so their prognosis may depend on arbitrarily old samples
 /// and the full history must be analyzed instead.
+///
+/// Only the loaded samples are inspected: a bucket of any window type with no samples
+/// since the cutoff is no longer reported by agy and is omitted like any stale bucket,
+/// rather than forcing every later run to load the full retention window.
 pub fn supports_bounded_analysis(samples: &[Sample]) -> bool {
     samples.iter().all(|s| window_length(&s.window).is_some())
 }

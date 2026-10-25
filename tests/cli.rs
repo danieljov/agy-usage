@@ -685,7 +685,14 @@ fn cli_html_and_show_once_load_only_the_history_window() {
         mk(now - chrono::Duration::minutes(10), "live-bucket-5h", 0.9),
         mk(now - chrono::Duration::minutes(5), "live-bucket-5h", 0.8),
     ];
-    agy_usage::store::append(&samples_file, std::slice::from_ref(&stale)).unwrap();
+    // A retired bucket with an unknown window is stale too: it neither forces a
+    // full-history load nor gets reported.
+    let stale_monthly = agy_usage::model::Sample {
+        group: "Retired Models".to_string(),
+        window: "monthly".to_string(),
+        ..mk(now - chrono::Duration::days(50), "stale-monthly", 0.7)
+    };
+    agy_usage::store::append(&samples_file, &[stale.clone(), stale_monthly]).unwrap();
     {
         use std::io::Write;
         let mut f = fs::OpenOptions::new()
@@ -706,6 +713,10 @@ fn cli_html_and_show_once_load_only_the_history_window() {
     let html = fs::read_to_string(data_dir.path().join("out.html")).unwrap();
     assert!(html.contains("\"bucket_id\":\"live-bucket-5h\""));
     assert!(!html.contains("stale-bucket-5h"));
+    assert!(!html.contains("stale-monthly"));
+    assert!(!html.contains("Retired Models"));
+    // The truncated line is not valid JSON, so even the timestamp-only parse fails
+    // and it is reported once.
     assert!(String::from_utf8_lossy(&out.stderr).contains("skipped 1 corrupt lines"));
 
     // A long enough --history-days brings the stale bucket back.
@@ -733,7 +744,7 @@ fn cli_html_and_show_once_load_only_the_history_window() {
 
     // The raw file is untouched by bounded loading.
     let loaded = agy_usage::store::load(&samples_file).unwrap();
-    assert_eq!(loaded.samples.len(), 3);
+    assert_eq!(loaded.samples.len(), 4);
     assert_eq!(loaded.skipped, 1);
 }
 
