@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-25
+
 ### Added
 - `store::load_since`, `forecast::analysis_cutoff`, `forecast::analyze_since`, and `forecast::supports_bounded_analysis` for analyzing only the samples needed for a history window, and `forecast::analyze_owned` for analyzing samples without cloning them.
 
@@ -18,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `skipped N corrupt lines` warning of these commands no longer counts corrupt lines older than the loaded range whose timestamp is still readable.
 - `store::prune` buffers writes to its temporary file.
 - The HTML dashboard template is filled in one pass instead of three full-string replacements; substituted content is never re-scanned for placeholders.
+
+### Fixed
+- **Mid-Window Quota Reconciliation Boundary Detection**:
+  - `forecast::window_boundaries` now ignores small mid-window backend quota reconciliations (`+0.5%` to `+10%`) when `reset_time` has not advanced (`<= 60s`), preventing false window reset boundaries from truncating `BucketReport::current` and burn-rate lookback while preserving detection of scheduled/early resets (`reset_moved && (reset_expired || quota_increased)`), large refill jumps (`> +10%`), and `disabled` state transitions.
 
 ## [0.2.0] - 2026-10-23
 
@@ -121,6 +127,7 @@ Initial release of `agy-usage`: quota history, burn-rate prognosis, and interact
   - Standalone, stripped Linux x86_64 binary archives with SHA-256 checksums published via automated GitHub Release workflow.
   - Automated one-line curl installation script (`install.sh`) with automated SHA-256 checksum verification.
 
+[0.3.0]: https://github.com/danieljov/agy-usage/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/danieljov/agy-usage/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/danieljov/agy-usage/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/danieljov/agy-usage/compare/v0.1.2...v0.1.3
