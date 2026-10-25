@@ -132,7 +132,15 @@ pub fn format_reset_cell(rep: &BucketReport, now: DateTime<Utc>, clock: ClockFor
     format_reset_cell_with_tz(rep, now, clock, &Local)
 }
 
+/// Computes the visible chart range and points for `rep`.
+///
+/// # Preconditions
+///
+/// `rep.history` must be sorted by timestamp, as produced by
+/// [`crate::forecast::analyze`]; the visible range is located by binary search.
+/// This is checked in debug builds only.
 pub fn chart_viewport(rep: &BucketReport, time_range: TimeRange) -> Option<ChartViewport> {
+    debug_assert!(rep.history.is_sorted_by_key(|s| s.ts));
     let reset_time = rep.prognosis.reset_time?;
     let last_sample_ts = rep.prognosis.last_sample.timestamp() as f64;
     let end_ts = (reset_time.timestamp() as f64).max(last_sample_ts);
@@ -154,10 +162,13 @@ pub fn chart_viewport(rep: &BucketReport, time_range: TimeRange) -> Option<Chart
             let dur = time_range.duration_secs().unwrap_or(0.0);
             let raw_min = end_ts - dur;
             if raw_min > last_sample_ts {
+                let threshold = last_sample_ts - dur;
+                let first = rep
+                    .history
+                    .partition_point(|s| (s.ts.timestamp() as f64) < threshold);
                 rep.history
-                    .iter()
+                    .get(first)
                     .map(|s| s.ts.timestamp() as f64)
-                    .find(|&t| t >= last_sample_ts - dur)
                     .unwrap_or(last_sample_ts)
                     .min(last_sample_ts)
             } else {
@@ -190,12 +201,18 @@ pub fn chart_viewport(rep: &BucketReport, time_range: TimeRange) -> Option<Chart
             .map(|s| (s.ts.timestamp() as f64, s.remaining * 100.0))
             .collect()
     } else {
-        rep.history
+        // `history` is sorted by timestamp, so the visible range is a contiguous slice
+        // found by binary search instead of scanning the whole retained history.
+        let lo = rep
+            .history
+            .partition_point(|s| (s.ts.timestamp() as f64) < x_min);
+        let hi = rep
+            .history
+            .partition_point(|s| (s.ts.timestamp() as f64) <= x_max)
+            .max(lo);
+        rep.history[lo..hi]
             .iter()
-            .filter_map(|s| {
-                let x = s.ts.timestamp() as f64;
-                (x >= x_min && x <= x_max).then_some((x, s.remaining * 100.0))
-            })
+            .map(|s| (s.ts.timestamp() as f64, s.remaining * 100.0))
             .collect()
     };
 
@@ -954,23 +971,91 @@ impl Drop for ShutdownWorkerGuard {
     }
 }
 
+/// Result of an incremental reload of the samples file.
+struct Reloaded {
+    /// Fresh reports, or `None` when no new samples were found.
+    reports: Option<Vec<BucketReport>>,
+    /// Corrupt lines encountered in the newly read part of the file.
+    skipped: usize,
+}
+
 fn reload_incremental(
     path: &Path,
     cursor: &mut crate::store::Cursor,
     acc: &mut Vec<Sample>,
     tight: f64,
-) -> Option<Vec<BucketReport>> {
-    let inc = crate::store::load_from(path, *cursor).ok()?;
+) -> std::io::Result<Reloaded> {
+    let inc = crate::store::load_from(path, *cursor)?;
+    let skipped = inc.loaded.skipped;
+    *cursor = inc.cursor;
     if inc.reset {
         *acc = inc.loaded.samples;
     } else if inc.loaded.samples.is_empty() {
-        *cursor = inc.cursor;
-        return None;
+        return Ok(Reloaded {
+            reports: None,
+            skipped,
+        });
     } else {
         acc.extend(inc.loaded.samples);
     }
-    *cursor = inc.cursor;
-    Some(crate::forecast::analyze(acc, tight))
+    Ok(Reloaded {
+        reports: Some(crate::forecast::analyze(acc, tight)),
+        skipped,
+    })
+}
+
+/// Applies a reload result to the view, surfacing load errors and corrupt lines in
+/// the status message. `load_error` tracks the load-error message currently shown so
+/// it can be cleared once loading succeeds again. Returns whether anything visible
+/// changed.
+fn apply_reload(
+    result: std::io::Result<Reloaded>,
+    path: &Path,
+    reports: &mut Vec<BucketReport>,
+    state: &mut ViewState,
+    load_error: &mut Option<String>,
+) -> bool {
+    match result {
+        Ok(reloaded) => {
+            let mut changed = false;
+            if let Some(err) = load_error.take()
+                && state.message.as_deref() == Some(err.as_str())
+            {
+                state.message = None;
+                changed = true;
+            }
+            if reloaded.skipped > 0 {
+                state.message = Some(format!(
+                    "Skipped {} corrupt lines in {}",
+                    reloaded.skipped,
+                    path.display()
+                ));
+                changed = true;
+            }
+            if let Some(new_reports) = reloaded.reports {
+                *reports = new_reports;
+                changed = true;
+            }
+            changed
+        }
+        Err(e) => {
+            let msg = format!("Failed to load {}: {e}", path.display());
+            let changed = state.message.as_deref() != Some(msg.as_str());
+            state.message = Some(msg.clone());
+            *load_error = Some(msg);
+            changed
+        }
+    }
+}
+
+/// How often an otherwise idle TUI repaints, so relative times ("12s ago",
+/// reset countdowns) stay current without redrawing on every input poll.
+const IDLE_REDRAW_INTERVAL: StdDuration = StdDuration::from_secs(1);
+
+/// Whether the screen must be repainted: state changed since the last draw, nothing
+/// has been drawn yet, or the idle repaint interval has elapsed.
+fn needs_redraw(dirty: bool, last_draw: Option<Instant>, now: Instant) -> bool {
+    dirty || last_draw.is_none_or(|t| now.duration_since(t) >= IDLE_REDRAW_INTERVAL)
 }
 
 pub fn run(data_dir: &Path, tight: f64, agy_bin: &str, clock: ClockFormat) -> Result<()> {
@@ -996,8 +1081,13 @@ pub fn run(data_dir: &Path, tight: f64, agy_bin: &str, clock: ClockFormat) -> Re
             handle: None,
         };
 
+        let mut dirty = true;
+        let mut last_draw: Option<Instant> = None;
+        let mut load_error: Option<String> = None;
+
         loop {
             while let Ok(outcome) = refresh_rx.try_recv() {
+                dirty = true;
                 is_refreshing = false;
                 if let Some(h) = worker_guard.handle.take() {
                     let _ = h.join();
@@ -1005,14 +1095,19 @@ pub fn run(data_dir: &Path, tight: f64, agy_bin: &str, clock: ClockFormat) -> Re
                 match outcome {
                     RefreshOutcome::Success(msg) => {
                         state.message = Some(msg);
-                        if let Some(new_reports) = reload_incremental(
+                        let result = reload_incremental(
                             &samples_path,
                             &mut cursor,
                             &mut accumulated_samples,
                             tight,
-                        ) {
-                            reports = new_reports;
-                        }
+                        );
+                        apply_reload(
+                            result,
+                            &samples_path,
+                            &mut reports,
+                            &mut state,
+                            &mut load_error,
+                        );
                         last_reload = Instant::now();
                     }
                     RefreshOutcome::Error(err) => {
@@ -1033,24 +1128,38 @@ pub fn run(data_dir: &Path, tight: f64, agy_bin: &str, clock: ClockFormat) -> Re
                     state.message = Some("Refresh worker panicked".to_string());
                 }
                 is_refreshing = false;
+                dirty = true;
             }
 
             let now_instant = Instant::now();
             if now_instant.duration_since(last_reload) >= StdDuration::from_secs(30) {
-                if let Some(new_reports) =
-                    reload_incremental(&samples_path, &mut cursor, &mut accumulated_samples, tight)
-                {
-                    reports = new_reports;
-                }
+                let result =
+                    reload_incremental(&samples_path, &mut cursor, &mut accumulated_samples, tight);
+                dirty |= apply_reload(
+                    result,
+                    &samples_path,
+                    &mut reports,
+                    &mut state,
+                    &mut load_error,
+                );
                 last_reload = now_instant;
             }
 
-            let now_utc = Utc::now();
-            terminal.draw(|f| draw(f, &reports, &state, now_utc))?;
+            if needs_redraw(dirty, last_draw, now_instant) {
+                let now_utc = Utc::now();
+                terminal.draw(|f| draw(f, &reports, &state, now_utc))?;
+                dirty = false;
+                last_draw = Some(now_instant);
+            }
 
-            if event::poll(StdDuration::from_millis(250))?
-                && let Event::Key(key) = event::read()?
-            {
+            let event = if event::poll(StdDuration::from_millis(250))? {
+                Some(event::read()?)
+            } else {
+                None
+            };
+            // Any terminal event (key, resize, focus, paste) may change what is shown.
+            dirty |= event.is_some();
+            if let Some(Event::Key(key)) = event {
                 if (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c'))
                     || key.code == KeyCode::Char('q')
                 {
@@ -1527,8 +1636,9 @@ mod tests {
         let mut acc = Vec::new();
 
         // 1. Initial load from non-existent file
-        let reports = reload_incremental(&path, &mut cursor, &mut acc, 0.1);
-        assert!(reports.is_none());
+        let reports = reload_incremental(&path, &mut cursor, &mut acc, 0.1).unwrap();
+        assert!(reports.reports.is_none());
+        assert_eq!(reports.skipped, 0);
         assert!(acc.is_empty());
 
         // 2. Append sample
@@ -1543,13 +1653,13 @@ mod tests {
         };
         crate::store::append(&path, std::slice::from_ref(&s1)).unwrap();
 
-        let reports = reload_incremental(&path, &mut cursor, &mut acc, 0.1);
-        assert!(reports.is_some());
+        let reports = reload_incremental(&path, &mut cursor, &mut acc, 0.1).unwrap();
+        assert!(reports.reports.is_some());
         assert_eq!(acc, vec![s1.clone()]);
 
         // 3. No changes: returns None, keeps acc
-        let reports_none = reload_incremental(&path, &mut cursor, &mut acc, 0.1);
-        assert!(reports_none.is_none());
+        let reports_none = reload_incremental(&path, &mut cursor, &mut acc, 0.1).unwrap();
+        assert!(reports_none.reports.is_none());
         assert_eq!(acc, vec![s1.clone()]);
 
         // 4. Append another sample
@@ -1564,15 +1674,15 @@ mod tests {
         };
         crate::store::append(&path, std::slice::from_ref(&s2)).unwrap();
 
-        let reports = reload_incremental(&path, &mut cursor, &mut acc, 0.1);
-        assert!(reports.is_some());
+        let reports = reload_incremental(&path, &mut cursor, &mut acc, 0.1).unwrap();
+        assert!(reports.reports.is_some());
         assert_eq!(acc, vec![s1.clone(), s2.clone()]);
 
         // 5. Prune old sample
         crate::store::prune(&path, Utc.with_ymd_and_hms(2026, 10, 11, 12, 1, 0).unwrap()).unwrap();
 
-        let reports = reload_incremental(&path, &mut cursor, &mut acc, 0.1);
-        assert!(reports.is_some());
+        let reports = reload_incremental(&path, &mut cursor, &mut acc, 0.1).unwrap();
+        assert!(reports.reports.is_some());
         assert_eq!(acc, vec![s2]);
     }
 
@@ -2072,5 +2182,223 @@ mod tests {
         // Negative boundary: default Window range omits [Window] badge from chart title
         let text_default = render_plain(&reports, now, 120, 40, ClockFormat::H24);
         assert!(!text_default.contains("[Window]"));
+    }
+
+    #[test]
+    fn needs_redraw_only_when_dirty_or_idle_interval_elapsed() {
+        let t0 = Instant::now();
+        assert!(needs_redraw(false, None, t0), "first frame must draw");
+        assert!(needs_redraw(true, Some(t0), t0), "dirty state must draw");
+        assert!(!needs_redraw(false, Some(t0), t0));
+        assert!(!needs_redraw(
+            false,
+            Some(t0),
+            t0 + IDLE_REDRAW_INTERVAL - StdDuration::from_millis(1)
+        ));
+        assert!(needs_redraw(false, Some(t0), t0 + IDLE_REDRAW_INTERVAL));
+    }
+
+    #[test]
+    fn chart_viewport_binary_search_matches_linear_filter() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 20, 12, 0, 0).unwrap();
+        let reset = now + chrono::Duration::days(3);
+        // 40 days of irregular samples, with duplicate timestamps.
+        let mut samples = Vec::new();
+        let mut ts = now - chrono::Duration::days(40);
+        let mut i = 0i64;
+        while ts <= now {
+            for _ in 0..(1 + i % 3 / 2) {
+                samples.push(Sample {
+                    ts,
+                    group: "G".to_string(),
+                    bucket_id: "g-weekly".to_string(),
+                    window: "weekly".to_string(),
+                    remaining: 0.9 - (i % 50) as f64 / 100.0,
+                    reset_time: Some(reset),
+                    disabled: false,
+                });
+            }
+            ts += chrono::Duration::seconds(173 + (i * 37) % 600);
+            i += 1;
+        }
+        let rep = &analyze(&samples, 0.10)[0];
+        for range in [
+            TimeRange::H24,
+            TimeRange::D7,
+            TimeRange::D30,
+            TimeRange::All,
+        ] {
+            let vp = chart_viewport(rep, range).unwrap();
+            let expected: Vec<(f64, f64)> = rep
+                .history
+                .iter()
+                .map(|s| (s.ts.timestamp() as f64, s.remaining * 100.0))
+                .filter(|&(x, _)| x >= vp.x_min && x <= vp.x_max)
+                .collect();
+            assert!(!expected.is_empty(), "{range:?}");
+            assert_eq!(vp.actual_pts, expected, "{range:?}");
+        }
+        // Samples outside the 24h range are excluded.
+        let vp = chart_viewport(rep, TimeRange::H24).unwrap();
+        assert!(vp.actual_pts.len() < rep.history.len());
+    }
+
+    #[test]
+    fn chart_viewport_stale_bucket_starts_at_first_sample_in_range() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 20, 12, 0, 0).unwrap();
+        // Reset is 5 days after the last sample, so `end - 24h` is past the last
+        // sample and the range is anchored on the history instead.
+        let reset = now + chrono::Duration::days(5);
+        let samples: Vec<Sample> = (0..=48)
+            .map(|h| Sample {
+                ts: now - chrono::Duration::hours(48 - h) + chrono::Duration::seconds(7),
+                group: "G".to_string(),
+                bucket_id: "g-weekly".to_string(),
+                window: "weekly".to_string(),
+                remaining: 0.5,
+                reset_time: Some(reset),
+                disabled: false,
+            })
+            .collect();
+        let rep = &analyze(&samples, 0.10)[0];
+        let vp = chart_viewport(rep, TimeRange::H24).unwrap();
+        let last = rep.prognosis.last_sample.timestamp() as f64;
+        let naive = rep
+            .history
+            .iter()
+            .map(|s| s.ts.timestamp() as f64)
+            .find(|&t| t >= last - 86_400.0)
+            .unwrap();
+        assert_eq!(vp.x_min, naive);
+        assert_eq!(vp.actual_pts.len(), 25);
+    }
+
+    fn acc_sample() -> Sample {
+        Sample {
+            ts: Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap(),
+            group: "Gemini".to_string(),
+            bucket_id: "b1".to_string(),
+            window: "5h".to_string(),
+            remaining: 0.9,
+            reset_time: Some(Utc.with_ymd_and_hms(2026, 10, 11, 17, 0, 0).unwrap()),
+            disabled: false,
+        }
+    }
+
+    #[test]
+    fn reload_surfaces_load_errors_and_corrupt_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("samples.jsonl");
+        let mut cursor = crate::store::Cursor::default();
+        let mut acc = Vec::new();
+        let mut reports = make_test_reports();
+        let mut state = ViewState::default();
+        let mut load_error = None;
+
+        // A directory in place of the samples file is a load error, not "no data".
+        std::fs::create_dir(&path).unwrap();
+        let result = reload_incremental(&path, &mut cursor, &mut acc, 0.1);
+        assert!(result.is_err());
+        assert!(apply_reload(
+            result,
+            &path,
+            &mut reports,
+            &mut state,
+            &mut load_error
+        ));
+        let msg = state.message.clone().unwrap();
+        assert!(msg.starts_with("Failed to load"), "{msg}");
+        assert_eq!(reports, make_test_reports(), "reports kept on error");
+        // Repeating the same error does not force a repaint.
+        let again = reload_incremental(&path, &mut cursor, &mut acc, 0.1);
+        assert!(!apply_reload(
+            again,
+            &path,
+            &mut reports,
+            &mut state,
+            &mut load_error
+        ));
+
+        // Recovery without new data still clears the stale error.
+        std::fs::remove_dir(&path).unwrap();
+        let result = reload_incremental(&path, &mut cursor, &mut acc, 0.1);
+        assert!(apply_reload(
+            result,
+            &path,
+            &mut reports,
+            &mut state,
+            &mut load_error
+        ));
+        assert_eq!(state.message, None);
+        assert_eq!(load_error, None);
+
+        // An unrelated message is never cleared by a successful reload.
+        state.message = Some("Refreshed successfully".to_string());
+        let result = reload_incremental(&path, &mut cursor, &mut acc, 0.1);
+        assert!(!apply_reload(
+            result,
+            &path,
+            &mut reports,
+            &mut state,
+            &mut load_error
+        ));
+        assert_eq!(state.message.as_deref(), Some("Refreshed successfully"));
+
+        // The file appears with one valid sample: reports are replaced.
+        let sample = acc_sample();
+        crate::store::append(&path, std::slice::from_ref(&sample)).unwrap();
+        let result = reload_incremental(&path, &mut cursor, &mut acc, 0.1);
+        assert!(apply_reload(
+            result,
+            &path,
+            &mut reports,
+            &mut state,
+            &mut load_error
+        ));
+        let loaded_reports = reports.clone();
+        assert_eq!(loaded_reports.len(), 1);
+        assert_eq!(acc, vec![sample]);
+
+        // Only corrupt lines appended: no new reports, but the user is told.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(b"{bad\n{also bad\n").unwrap();
+        }
+        let result = reload_incremental(&path, &mut cursor, &mut acc, 0.1).unwrap();
+        assert_eq!(result.skipped, 2);
+        assert!(result.reports.is_none());
+        assert!(apply_reload(
+            Ok(result),
+            &path,
+            &mut reports,
+            &mut state,
+            &mut load_error
+        ));
+        assert!(
+            state
+                .message
+                .as_deref()
+                .unwrap()
+                .starts_with("Skipped 2 corrupt lines"),
+            "{:?}",
+            state.message
+        );
+        assert_eq!(reports, loaded_reports);
+
+        // Nothing new: nothing changes.
+        let result = reload_incremental(&path, &mut cursor, &mut acc, 0.1);
+        let before = state.message.clone();
+        assert!(!apply_reload(
+            result,
+            &path,
+            &mut reports,
+            &mut state,
+            &mut load_error
+        ));
+        assert_eq!(state.message, before);
     }
 }

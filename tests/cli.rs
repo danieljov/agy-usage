@@ -658,3 +658,165 @@ fn release_workflow_configures_idempotent_crates_io_publish() {
     assert!(readme.contains("CARGO_REGISTRY_TOKEN"));
     assert!(readme.contains("Trusted Publishing"));
 }
+
+#[test]
+fn cli_html_and_show_once_load_only_the_history_window() {
+    let data_dir = tempdir().unwrap();
+    let samples_file = data_dir.path().join("samples.jsonl");
+    let now = chrono::Utc::now();
+    let mk = |ts: chrono::DateTime<chrono::Utc>, bucket_id: &str, remaining: f64| {
+        agy_usage::model::Sample {
+            ts,
+            group: "Gemini Models".to_string(),
+            bucket_id: bucket_id.to_string(),
+            window: "5h".to_string(),
+            remaining,
+            reset_time: Some(ts + chrono::Duration::hours(3)),
+            disabled: false,
+        }
+    };
+    // Stale bucket last seen 60 days ago (beyond --history-days 30 + margin), and a
+    // corrupt line among the old records that must not be reported.
+    let stale = agy_usage::model::Sample {
+        group: "Retired Models".to_string(),
+        ..mk(now - chrono::Duration::days(60), "stale-bucket-5h", 0.4)
+    };
+    let recent = [
+        mk(now - chrono::Duration::minutes(10), "live-bucket-5h", 0.9),
+        mk(now - chrono::Duration::minutes(5), "live-bucket-5h", 0.8),
+    ];
+    // A retired bucket with an unknown window is stale too: it neither forces a
+    // full-history load nor gets reported.
+    let stale_monthly = agy_usage::model::Sample {
+        group: "Retired Models".to_string(),
+        window: "monthly".to_string(),
+        ..mk(now - chrono::Duration::days(50), "stale-monthly", 0.7)
+    };
+    agy_usage::store::append(&samples_file, &[stale.clone(), stale_monthly]).unwrap();
+    {
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&samples_file)
+            .unwrap();
+        f.write_all(b"{\"ts\":\"2000-01-01T00:00:00Z\",\"group\":\"truncated\n")
+            .unwrap();
+    }
+    agy_usage::store::append(&samples_file, &recent).unwrap();
+
+    let out = run_html(data_dir.path(), &["--clock", "24h", "--history-days", "30"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let html = fs::read_to_string(data_dir.path().join("out.html")).unwrap();
+    assert!(html.contains("\"bucket_id\":\"live-bucket-5h\""));
+    assert!(!html.contains("stale-bucket-5h"));
+    assert!(!html.contains("stale-monthly"));
+    assert!(!html.contains("Retired Models"));
+    // The truncated line is not valid JSON, so even the timestamp-only parse fails
+    // and it is reported once.
+    assert!(String::from_utf8_lossy(&out.stderr).contains("skipped 1 corrupt lines"));
+
+    // A long enough --history-days brings the stale bucket back.
+    let out = run_html(data_dir.path(), &["--clock", "24h", "--history-days", "90"]);
+    assert!(out.status.success());
+    let html = fs::read_to_string(data_dir.path().join("out.html")).unwrap();
+    assert!(html.contains("\"bucket_id\":\"stale-bucket-5h\""));
+    assert!(html.contains("\"bucket_id\":\"live-bucket-5h\""));
+
+    let out = Command::new(env!("CARGO_BIN_EXE_agy-usage"))
+        .arg("--data-dir")
+        .arg(data_dir.path())
+        .args(["--clock", "24h", "show", "--once"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // The table shows groups, not bucket ids.
+    assert!(stdout.contains("Gemini Models"), "{stdout}");
+    assert!(!stdout.contains("Retired Models"), "{stdout}");
+
+    // The raw file is untouched by bounded loading.
+    let loaded = agy_usage::store::load(&samples_file).unwrap();
+    assert_eq!(loaded.samples.len(), 4);
+    assert_eq!(loaded.skipped, 1);
+}
+
+#[test]
+fn cli_html_uses_full_history_for_unknown_window_buckets() {
+    let data_dir = tempdir().unwrap();
+    let samples_file = data_dir.path().join("samples.jsonl");
+    let now = chrono::Utc::now();
+    let reset = now + chrono::Duration::days(10);
+    // An unknown "monthly" window draining for 20 days with no reset in between. Its
+    // prognosis regresses over the whole window, which a 7 + 8 day load would cut.
+    let samples: Vec<agy_usage::model::Sample> = (0..=20 * 24)
+        .map(|h| {
+            let ts = now - chrono::Duration::hours(20 * 24 - h);
+            // Accelerating burn so a truncated regression gives a different slope.
+            let x = h as f64 / (20.0 * 24.0);
+            agy_usage::model::Sample {
+                ts,
+                group: "Gemini Models".to_string(),
+                bucket_id: "gemini-monthly".to_string(),
+                window: "monthly".to_string(),
+                remaining: 1.0 - 0.6 * x * x,
+                reset_time: Some(reset),
+                disabled: false,
+            }
+        })
+        .collect();
+    agy_usage::store::append(&samples_file, &samples).unwrap();
+    let expected = agy_usage::forecast::analyze(&samples, 0.10);
+    // An unrelated bucket last seen 60 days ago must stay omitted even though the
+    // monthly bucket forces a full-history load.
+    let stale_ts = now - chrono::Duration::days(60);
+    let stale = agy_usage::model::Sample {
+        ts: stale_ts,
+        group: "Retired Models".to_string(),
+        bucket_id: "retired-5h".to_string(),
+        window: "5h".to_string(),
+        remaining: 0.5,
+        reset_time: Some(stale_ts + chrono::Duration::hours(5)),
+        disabled: false,
+    };
+    agy_usage::store::append(&samples_file, std::slice::from_ref(&stale)).unwrap();
+    let expected_rate = expected[0].prognosis.rate_per_h.unwrap();
+
+    let out = run_html(data_dir.path(), &["--clock", "24h", "--history-days", "7"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let html = fs::read_to_string(data_dir.path().join("out.html")).unwrap();
+    let start = html.find("const data = ").unwrap() + "const data = ".len();
+    let data: serde_json::Value = serde_json::Deserializer::from_str(&html[start..])
+        .into_iter::<serde_json::Value>()
+        .next()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        data["reports"].as_array().unwrap().len(),
+        1,
+        "{}",
+        data["reports"]
+    );
+    assert!(!html.contains("retired-5h"));
+    let rep = &data["reports"][0];
+    assert_eq!(rep["bucket_id"], "gemini-monthly");
+    let rate = rep["prognosis"]["rate_per_h"].as_f64().unwrap();
+    assert!(
+        (rate - expected_rate).abs() < 1e-12,
+        "rate {rate} != full-history rate {expected_rate}"
+    );
+    // The displayed series is still limited to --history-days.
+    let series = rep["series"].as_array().unwrap();
+    assert!(series.len() <= 7 * 24 + 1, "{}", series.len());
+}

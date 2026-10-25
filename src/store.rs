@@ -51,7 +51,14 @@ fn lock_sidecar(path: &Path, op: FlockOperation) -> std::io::Result<LockGuard> {
     Ok(LockGuard { file })
 }
 
-fn parse_line(raw: &[u8]) -> Option<Result<Sample, ()>> {
+/// Timestamp-only view of a stored line, used to discard old lines without
+/// allocating the string fields of a full [`Sample`].
+#[derive(serde::Deserialize)]
+struct TsOnly {
+    ts: DateTime<Utc>,
+}
+
+fn trimmed_line(raw: &[u8]) -> Option<Result<&str, ()>> {
     let mut slice = raw;
     if slice.ends_with(b"\n") {
         slice = &slice[..slice.len() - 1];
@@ -65,9 +72,27 @@ fn parse_line(raw: &[u8]) -> Option<Result<Sample, ()>> {
             if trimmed.is_empty() {
                 None
             } else {
-                Some(serde_json::from_str::<Sample>(trimmed).map_err(|_| ()))
+                Some(Ok(trimmed))
             }
         }
+        Err(_) => Some(Err(())),
+    }
+}
+
+fn parse_line(raw: &[u8]) -> Option<Result<Sample, ()>> {
+    trimmed_line(raw)
+        .map(|line| line.and_then(|l| serde_json::from_str::<Sample>(l).map_err(|_| ())))
+}
+
+/// Parses a line, returning `None` for blank lines and lines older than `cutoff`.
+fn parse_line_since(raw: &[u8], cutoff: DateTime<Utc>) -> Option<Result<Sample, ()>> {
+    let line = match trimmed_line(raw)? {
+        Ok(line) => line,
+        Err(()) => return Some(Err(())),
+    };
+    match serde_json::from_str::<TsOnly>(line) {
+        Ok(TsOnly { ts }) if ts < cutoff => None,
+        Ok(_) => Some(serde_json::from_str::<Sample>(line).map_err(|_| ())),
         Err(_) => Some(Err(())),
     }
 }
@@ -92,6 +117,20 @@ pub fn append(path: &Path, samples: &[Sample]) -> std::io::Result<()> {
 }
 
 pub fn load(path: &Path) -> std::io::Result<Loaded> {
+    load_filtered(path, None)
+}
+
+/// Loads only samples with `ts >= cutoff`.
+///
+/// Lines are filtered individually, so the result does not depend on the file being
+/// chronologically ordered (e.g. after a backwards system clock jump). Older lines are
+/// discarded after a timestamp-only parse; `skipped` counts lines whose timestamp
+/// cannot be read and newer lines that fail to parse as a full [`Sample`].
+pub fn load_since(path: &Path, cutoff: DateTime<Utc>) -> std::io::Result<Loaded> {
+    load_filtered(path, Some(cutoff))
+}
+
+fn load_filtered(path: &Path, cutoff: Option<DateTime<Utc>>) -> std::io::Result<Loaded> {
     if !path.exists() {
         return Ok(Loaded {
             samples: Vec::new(),
@@ -112,7 +151,11 @@ pub fn load(path: &Path) -> std::io::Result<Loaded> {
     let mut line_buf = Vec::new();
 
     while reader.read_until(b'\n', &mut line_buf)? > 0 {
-        match parse_line(&line_buf) {
+        let parsed = match cutoff {
+            Some(cutoff) => parse_line_since(&line_buf, cutoff),
+            None => parse_line(&line_buf),
+        };
+        match parsed {
             Some(Ok(sample)) => samples.push(sample),
             Some(Err(())) => skipped += 1,
             None => {}
@@ -163,6 +206,9 @@ pub fn prune(path: &Path, cutoff: DateTime<Utc>) -> std::io::Result<usize> {
 
     let mut reader = BufReader::new(file);
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    // serde_json emits many small writes per value; buffer them instead of issuing
+    // a syscall per token against the temp file.
+    let mut writer = std::io::BufWriter::new(temp.as_file_mut());
     let mut pruned = 0;
     let mut line_buf = Vec::new();
 
@@ -170,9 +216,9 @@ pub fn prune(path: &Path, cutoff: DateTime<Utc>) -> std::io::Result<usize> {
         match parse_line(&line_buf) {
             Some(Ok(sample)) => {
                 if sample.ts >= cutoff {
-                    serde_json::to_writer(&mut temp, &sample)
+                    serde_json::to_writer(&mut writer, &sample)
                         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-                    temp.write_all(b"\n")?;
+                    writer.write_all(b"\n")?;
                 } else {
                     pruned += 1;
                 }
@@ -184,6 +230,8 @@ pub fn prune(path: &Path, cutoff: DateTime<Utc>) -> std::io::Result<usize> {
         line_buf.clear();
     }
 
+    writer.flush()?;
+    drop(writer);
     drop(reader);
 
     #[cfg(unix)]
@@ -612,5 +660,84 @@ mod tests {
         assert!(r.loaded.samples.is_empty());
         assert!(r.reset);
         assert_eq!(r.cursor, Cursor::default());
+    }
+
+    fn sample_at(id: &str, ts: DateTime<Utc>) -> Sample {
+        Sample {
+            ts,
+            ..make_sample(id, 0.5)
+        }
+    }
+
+    #[test]
+    fn load_since_keeps_only_samples_at_or_after_cutoff() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("samples.jsonl");
+        let cutoff = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
+        let old = sample_at("old", cutoff - chrono::Duration::seconds(1));
+        let at = sample_at("at", cutoff);
+        let new = sample_at("new", cutoff + chrono::Duration::days(3));
+        // Out of chronological order on purpose (e.g. after a backwards clock jump).
+        append(&path, &[new.clone(), old.clone(), at.clone()]).unwrap();
+
+        let loaded = load_since(&path, cutoff).unwrap();
+        assert_eq!(loaded.skipped, 0);
+        assert_eq!(loaded.samples, vec![new.clone(), at.clone()]);
+        assert!(!loaded.samples.contains(&old));
+
+        // The unbounded loader still sees everything.
+        assert_eq!(load(&path).unwrap().samples, vec![new, old, at]);
+    }
+
+    #[test]
+    fn load_since_counts_unreadable_and_corrupt_recent_lines() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("samples.jsonl");
+        let cutoff = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
+        let keep = sample_at("keep", cutoff + chrono::Duration::hours(1));
+        let mut content = Vec::new();
+        content.extend_from_slice(b"{bad\n");
+        content.extend_from_slice(b"{\"ts\":\"2026-09-01T00:00:00Z\",\"group\":\"g\"}\n");
+        content.extend_from_slice(b"{\"ts\":\"2026-10-02T00:00:00Z\",\"group\":\"g\"}\n");
+        content.extend_from_slice(b"\xff\n\n");
+        content.extend_from_slice(serde_json::to_string(&keep).unwrap().as_bytes());
+        content.extend_from_slice(b"\r\n");
+        fs::write(&path, content).unwrap();
+
+        let loaded = load_since(&path, cutoff).unwrap();
+        // `{bad`, the invalid UTF-8 line, and the recent-but-incomplete record are
+        // skipped; the old incomplete record is discarded by timestamp alone.
+        assert_eq!(loaded.skipped, 3);
+        assert_eq!(loaded.samples, vec![keep]);
+    }
+
+    #[test]
+    fn load_since_missing_file_is_empty() {
+        let dir = tempdir().unwrap();
+        let loaded = load_since(&dir.path().join("none.jsonl"), Utc::now()).unwrap();
+        assert!(loaded.samples.is_empty());
+        assert_eq!(loaded.skipped, 0);
+    }
+
+    #[test]
+    fn prune_output_round_trips_through_buffered_writer() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("samples.jsonl");
+        let cutoff = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
+        // Enough records to exceed BufWriter's internal buffer several times.
+        let kept: Vec<Sample> = (0..2000)
+            .map(|i| sample_at(&format!("b{i}"), cutoff + chrono::Duration::minutes(i)))
+            .collect();
+        let dropped: Vec<Sample> = (1..=500)
+            .map(|i| sample_at("old", cutoff - chrono::Duration::minutes(i)))
+            .collect();
+        append(&path, &dropped).unwrap();
+        append(&path, &kept).unwrap();
+
+        assert_eq!(prune(&path, cutoff).unwrap(), 500);
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.skipped, 0);
+        assert_eq!(loaded.samples, kept);
+        assert!(fs::read_to_string(&path).unwrap().ends_with("}\n"));
     }
 }
