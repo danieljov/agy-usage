@@ -138,8 +138,8 @@ fn write_html_atomic(path: &Path, content: &str) -> Result<()> {
 /// Loads only the samples needed to display `history_days` of history (see
 /// [`agy_usage::forecast::analysis_cutoff`]) and analyzes them. Falls back to the full
 /// history when a bucket sampled since the cutoff has a window of unknown length, whose
-/// prognosis can depend on arbitrarily old samples. Buckets with no samples since the
-/// cutoff are stale and omitted regardless of window type.
+/// prognosis can depend on arbitrarily old samples. Either way, buckets with no recent
+/// samples are omitted by [`agy_usage::forecast::analyze_since`].
 fn load_reports(
     samples_path: &Path,
     now: chrono::DateTime<Utc>,
@@ -148,20 +148,18 @@ fn load_reports(
 ) -> Result<Vec<agy_usage::forecast::BucketReport>> {
     use agy_usage::forecast;
     let cutoff = forecast::analysis_cutoff(now, history_days);
-    let loaded = agy_usage::store::load_since(samples_path, cutoff)?;
-    let (loaded, bounded) = if forecast::supports_bounded_analysis(&loaded.samples) {
-        (loaded, true)
-    } else {
-        (agy_usage::store::load(samples_path)?, false)
-    };
+    let mut loaded = agy_usage::store::load_since(samples_path, cutoff)?;
+    if !forecast::supports_bounded_analysis(&loaded.samples) {
+        loaded = agy_usage::store::load(samples_path)?;
+    }
     if loaded.skipped > 0 {
         eprintln!("warning: skipped {} corrupt lines", loaded.skipped);
     }
-    Ok(if bounded {
-        forecast::analyze_since(loaded.samples, cutoff, tight_threshold)
-    } else {
-        forecast::analyze_owned(loaded.samples, tight_threshold)
-    })
+    Ok(forecast::analyze_since(
+        loaded.samples,
+        cutoff,
+        tight_threshold,
+    ))
 }
 
 fn main() -> Result<()> {

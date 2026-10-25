@@ -318,25 +318,31 @@ pub fn supports_bounded_analysis(samples: &[Sample]) -> bool {
     samples.iter().all(|s| window_length(&s.window).is_some())
 }
 
-/// Analyzes samples loaded from `cutoff` onwards (see [`analysis_cutoff`]).
+/// Analyzes the samples needed to display history since `cutoff` (see
+/// [`analysis_cutoff`]) and reports only buckets that are current within it.
 ///
-/// Reports exactly the buckets whose prognosis inputs lie entirely inside the loaded
-/// range: those whose newest sample is at least one rate lookback (see [`lookback`])
-/// after `cutoff`. For these, the prognosis, window start, and history after `cutoff`
-/// match [`analyze`] on the full history (`current` may be cut at `cutoff`). Buckets
-/// sampled only closer to (or before) the cutoff are omitted rather than reported with
-/// truncated data. Requires [`supports_bounded_analysis`]; buckets with an unknown
-/// window are omitted.
+/// `samples` must contain every sample since `cutoff`. If any of them belongs to a
+/// window of unknown length (see [`supports_bounded_analysis`]), it must contain the
+/// full history instead, because such a prognosis can depend on arbitrarily old
+/// samples.
+///
+/// A bucket with a known window is reported when its newest sample is at least one
+/// rate lookback (see [`lookback`]) after `cutoff`. Its prognosis, window start, and
+/// history after `cutoff` then match [`analyze`] on the full history (`current` may be
+/// cut at `cutoff`). A bucket with an unknown window is reported when its newest sample
+/// is at or after `cutoff`. Other buckets are stale and omitted, whether or not older
+/// samples were passed in.
 pub fn analyze_since(samples: Vec<Sample>, cutoff: DateTime<Utc>, tight: f64) -> Vec<BucketReport> {
     let mut reports = analyze_owned(samples, tight);
     reports.retain(|r| {
-        let newest = r.history.last().map(|s| s.ts);
-        match (newest, lookback(&r.window)) {
-            (Some(newest), Some(lb)) => newest
-                .checked_sub_signed(lb)
-                .is_some_and(|start| start >= cutoff),
-            _ => false,
-        }
+        let Some(newest) = r.history.last().map(|s| s.ts) else {
+            return false;
+        };
+        let earliest_input = match lookback(&r.window) {
+            Some(lb) => newest.checked_sub_signed(lb),
+            None => Some(newest),
+        };
+        earliest_input.is_some_and(|start| start >= cutoff)
     });
     reports
 }
@@ -1311,18 +1317,33 @@ mod tests {
     #[test]
     fn unknown_windows_require_full_history() {
         let now = base_time();
+        let cutoff = now - Duration::days(30);
         let mut samples = synth_store(now, 2);
         assert!(supports_bounded_analysis(&samples));
         assert!(supports_bounded_analysis(&[]));
         let mut monthly = samples[0].clone();
         monthly.bucket_id = "g-monthly".to_string();
         monthly.window = "monthly".to_string();
-        samples.push(monthly);
+        monthly.ts = cutoff;
+        samples.push(monthly.clone());
         assert!(!supports_bounded_analysis(&samples));
-        // analyze_since never reports a bucket it cannot bound.
-        let reports = analyze_since(samples, now - Duration::days(30), 0.10);
-        assert!(reports.iter().all(|r| r.window != "monthly"));
-        assert_eq!(reports.len(), 3);
+
+        // Full history passed in (the fallback): stale buckets of any window type are
+        // still omitted, and only current unknown-window buckets are kept.
+        let mut stale_monthly = monthly.clone();
+        stale_monthly.bucket_id = "old-monthly".to_string();
+        stale_monthly.ts = cutoff - Duration::seconds(1);
+        let mut stale_5h = samples[1].clone();
+        stale_5h.bucket_id = "old-5h".to_string();
+        stale_5h.ts = cutoff - Duration::days(30);
+        samples.push(stale_monthly);
+        samples.push(stale_5h);
+        assert_eq!(analyze(&samples, 0.10).len(), 6);
+
+        let reports = analyze_since(samples, cutoff, 0.10);
+        let mut ids: Vec<&str> = reports.iter().map(|r| r.bucket_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["g-5h", "g-monthly", "g-weekly", "p-weekly"]);
     }
 
     #[test]

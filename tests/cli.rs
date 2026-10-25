@@ -774,6 +774,19 @@ fn cli_html_uses_full_history_for_unknown_window_buckets() {
         .collect();
     agy_usage::store::append(&samples_file, &samples).unwrap();
     let expected = agy_usage::forecast::analyze(&samples, 0.10);
+    // An unrelated bucket last seen 60 days ago must stay omitted even though the
+    // monthly bucket forces a full-history load.
+    let stale_ts = now - chrono::Duration::days(60);
+    let stale = agy_usage::model::Sample {
+        ts: stale_ts,
+        group: "Retired Models".to_string(),
+        bucket_id: "retired-5h".to_string(),
+        window: "5h".to_string(),
+        remaining: 0.5,
+        reset_time: Some(stale_ts + chrono::Duration::hours(5)),
+        disabled: false,
+    };
+    agy_usage::store::append(&samples_file, std::slice::from_ref(&stale)).unwrap();
     let expected_rate = expected[0].prognosis.rate_per_h.unwrap();
 
     let out = run_html(data_dir.path(), &["--clock", "24h", "--history-days", "7"]);
@@ -789,6 +802,13 @@ fn cli_html_uses_full_history_for_unknown_window_buckets() {
         .next()
         .unwrap()
         .unwrap();
+    assert_eq!(
+        data["reports"].as_array().unwrap().len(),
+        1,
+        "{}",
+        data["reports"]
+    );
+    assert!(!html.contains("retired-5h"));
     let rep = &data["reports"][0];
     assert_eq!(rep["bucket_id"], "gemini-monthly");
     let rate = rep["prognosis"]["rate_per_h"].as_f64().unwrap();
