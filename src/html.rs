@@ -16,7 +16,7 @@ struct CompactReport<'a> {
     window: &'a str,
     window_start: Option<DateTime<Utc>>,
     reset_time: Option<DateTime<Utc>>,
-    boundaries: &'a [DateTime<Utc>],
+    boundaries: Vec<DateTime<Utc>>,
     prognosis: &'a Prognosis,
     series: Vec<(i64, f64)>,
 }
@@ -52,7 +52,14 @@ pub fn render(
                 window: &r.window,
                 window_start: r.window_start,
                 reset_time: r.prognosis.reset_time,
-                boundaries: &r.boundaries,
+                // Like `series`, limited to the displayed history so the output does
+                // not depend on how much older history was loaded.
+                boundaries: r
+                    .boundaries
+                    .iter()
+                    .copied()
+                    .filter(|&b| b >= cutoff)
+                    .collect(),
                 prognosis: &r.prognosis,
                 series,
             }
@@ -67,10 +74,46 @@ pub fn render(
 
     let json = serde_json::to_string(&data).expect("failed to serialize dashboard data");
     let safe_json = json.replace('<', "\\u003c");
-    TEMPLATE
-        .replace("/*__CHART_JS__*/", CHART_JS)
-        .replace("/*__DATE_FNS_ADAPTER__*/", DATE_FNS_ADAPTER)
-        .replace("/*__AGY_DATA__*/null", &safe_json)
+    fill_template(
+        TEMPLATE,
+        &[
+            ("/*__CHART_JS__*/", CHART_JS),
+            ("/*__DATE_FNS_ADAPTER__*/", DATE_FNS_ADAPTER),
+            ("/*__AGY_DATA__*/null", &safe_json),
+        ],
+    )
+}
+
+/// Replaces every occurrence of each placeholder in `template` in a single pass.
+///
+/// Only the template itself is searched: substituted values (e.g. the vendored
+/// Chart.js bundle or the data JSON) are copied verbatim and never re-scanned, so a
+/// placeholder-like string inside a value is not substituted.
+fn fill_template(template: &str, replacements: &[(&str, &str)]) -> String {
+    let mut matches: Vec<(usize, &str, &str)> = replacements
+        .iter()
+        .flat_map(|&(placeholder, value)| {
+            template
+                .match_indices(placeholder)
+                .map(move |(pos, _)| (pos, placeholder, value))
+        })
+        .collect();
+    matches.sort_by_key(|&(pos, _, _)| pos);
+
+    let extra: usize = matches.iter().map(|&(_, _, value)| value.len()).sum();
+    let mut out = String::with_capacity(template.len() + extra);
+    let mut cursor = 0;
+    for (pos, placeholder, value) in matches {
+        // Skip a match overlapping an already-substituted placeholder.
+        if pos < cursor {
+            continue;
+        }
+        out.push_str(&template[cursor..pos]);
+        out.push_str(value);
+        cursor = pos + placeholder.len();
+    }
+    out.push_str(&template[cursor..]);
+    out
 }
 
 #[cfg(test)]
@@ -530,5 +573,64 @@ mod tests {
         let start = html.find(prefix).expect("prefix not found") + prefix.len();
         let end = html[start..].find(";\n").expect("semicolon not found") + start;
         html[start..end].to_string()
+    }
+
+    #[test]
+    fn fill_template_matches_sequential_replace_for_dashboard() {
+        let data = r#"{"generated_at":"x","reports":[]}"#;
+        let expected = TEMPLATE
+            .replace("/*__CHART_JS__*/", CHART_JS)
+            .replace("/*__DATE_FNS_ADAPTER__*/", DATE_FNS_ADAPTER)
+            .replace("/*__AGY_DATA__*/null", data);
+        let actual = fill_template(
+            TEMPLATE,
+            &[
+                ("/*__CHART_JS__*/", CHART_JS),
+                ("/*__DATE_FNS_ADAPTER__*/", DATE_FNS_ADAPTER),
+                ("/*__AGY_DATA__*/null", data),
+            ],
+        );
+        assert_eq!(actual, expected);
+        assert!(!actual.contains("/*__AGY_DATA__*/"));
+    }
+
+    #[test]
+    fn fill_template_substitutes_all_occurrences_without_rescanning_values() {
+        let out = fill_template(
+            "a{X}b{Y}c{X}d",
+            &[("{X}", "<{Y}>"), ("{Y}", "y"), ("{absent}", "nope")],
+        );
+        // `{Y}` inside the value of `{X}` is copied verbatim, not substituted.
+        assert_eq!(out, "a<{Y}>byc<{Y}>d");
+        assert!(!out.contains("nope"));
+        assert_eq!(fill_template("plain", &[("{X}", "v")]), "plain");
+        assert_eq!(fill_template("", &[("{X}", "v")]), "");
+    }
+
+    #[test]
+    fn fill_template_skips_overlapping_placeholders() {
+        // "{AB}" and "B}" overlap; the earlier match wins and the overlapped one is
+        // ignored instead of producing out-of-bounds or duplicated output.
+        let out = fill_template("x{AB}y", &[("{AB}", "1"), ("B}", "2")]);
+        assert_eq!(out, "x1y");
+    }
+
+    #[test]
+    fn boundaries_are_limited_to_displayed_history() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 30, 12, 0, 0).unwrap();
+        let cutoff = now - Duration::days(7);
+        let mut rep = make_report("G", "b1", "weekly", vec![]);
+        // Deliberately unsorted to show no ordering is assumed.
+        rep.boundaries = vec![
+            now - Duration::days(1),
+            cutoff - Duration::seconds(1),
+            cutoff,
+            now - Duration::days(21),
+        ];
+        let html = render(&[rep], now, 7, ClockFormat::H24);
+        let data: serde_json::Value = serde_json::from_str(&extract_json(&html)).unwrap();
+        let got: Vec<DateTime<Utc>> =
+            serde_json::from_value(data["reports"][0]["boundaries"].clone()).unwrap();
+        assert_eq!(got, vec![now - Duration::days(1), cutoff]);
     }
 }

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `store::load_since`, `forecast::analysis_cutoff`, `forecast::analyze_since`, and `forecast::supports_bounded_analysis` for analyzing only the samples needed for a history window, and `forecast::analyze_owned` for analyzing samples without cloning them.
+
+### Changed
+- **Bounded loading**: `collect`, `html`, and `show --once` keep only the last `--history-days` + 8 days of samples in memory instead of the full retention window (52 MB → 17 MB peak RSS and 0.16 s → 0.10 s for `html` on a 109k-line, 98-day store). Buckets without a complete rate lookback in that range are no longer reported by these commands. Stores with buckets of unknown window length fall back to full-history analysis.
+- `show` (interactive) no longer loads and analyzes the samples file twice on startup, and now reports load errors and corrupt lines in its status bar instead of silently showing no data.
+- The interactive TUI repaints only on input, resize, new data, or once per second for relative times, instead of on every 250 ms input poll (idle CPU on the 30d range: ~4.7% → ~0.8%). Chart ranges are sliced from the history by binary search; `tui::chart_viewport` now requires `BucketReport::history` sorted by timestamp, as produced by `forecast::analyze`.
+- The HTML dashboard only embeds window boundaries inside `--history-days`, like the chart series.
+- The `skipped N corrupt lines` warning of these commands no longer counts corrupt lines older than the loaded range whose timestamp is still readable.
+- `store::prune` buffers writes to its temporary file.
+- The HTML dashboard template is filled in one pass instead of three full-string replacements; substituted content is never re-scanned for placeholders.
+
 ## [0.2.0] - 2026-10-23
 
 ### Added

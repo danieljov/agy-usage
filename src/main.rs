@@ -135,6 +135,34 @@ fn write_html_atomic(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+/// Loads only the samples needed to display `history_days` of history (see
+/// [`agy_usage::forecast::analysis_cutoff`]) and analyzes them. Falls back to the full
+/// history when a bucket has a window of unknown length, whose prognosis can depend on
+/// arbitrarily old samples.
+fn load_reports(
+    samples_path: &Path,
+    now: chrono::DateTime<Utc>,
+    history_days: u32,
+    tight_threshold: f64,
+) -> Result<Vec<agy_usage::forecast::BucketReport>> {
+    use agy_usage::forecast;
+    let cutoff = forecast::analysis_cutoff(now, history_days);
+    let loaded = agy_usage::store::load_since(samples_path, cutoff)?;
+    let (loaded, bounded) = if forecast::supports_bounded_analysis(&loaded.samples) {
+        (loaded, true)
+    } else {
+        (agy_usage::store::load(samples_path)?, false)
+    };
+    if loaded.skipped > 0 {
+        eprintln!("warning: skipped {} corrupt lines", loaded.skipped);
+    }
+    Ok(if bounded {
+        forecast::analyze_since(loaded.samples, cutoff, tight_threshold)
+    } else {
+        forecast::analyze_owned(loaded.samples, tight_threshold)
+    })
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let retention_days = effective_retention_days(cli.retention_days, cli.history_days)?;
@@ -170,44 +198,41 @@ fn main() -> Result<()> {
             }
 
             if !no_html {
-                let loaded = agy_usage::store::load(&samples_path)?;
-                if loaded.skipped > 0 {
-                    eprintln!("warning: skipped {} corrupt lines", loaded.skipped);
-                }
-                let reports = agy_usage::forecast::analyze(&loaded.samples, cli.tight_threshold);
+                let reports =
+                    load_reports(&samples_path, now, cli.history_days, cli.tight_threshold)?;
                 let html_content =
                     agy_usage::html::render(&reports, now, cli.history_days, cli.clock.resolve());
                 write_html_atomic(&data_dir.join("dashboard.html"), &html_content)?;
             }
         }
         Commands::Show { once } => {
-            let samples_path = data_dir.join("samples.jsonl");
-            let loaded = agy_usage::store::load(&samples_path)?;
-            if loaded.skipped > 0 {
-                eprintln!("warning: skipped {} corrupt lines", loaded.skipped);
-            }
-            let reports = agy_usage::forecast::analyze(&loaded.samples, cli.tight_threshold);
             let clock = cli.clock.resolve();
             if once {
-                agy_usage::tui::print_once(&reports, Utc::now(), clock)?;
+                let now = Utc::now();
+                let reports = load_reports(
+                    &data_dir.join("samples.jsonl"),
+                    now,
+                    cli.history_days,
+                    cli.tight_threshold,
+                )?;
+                agy_usage::tui::print_once(&reports, now, clock)?;
             } else {
+                // The interactive TUI loads the full retained history itself (its
+                // "All" range needs it), so nothing is pre-loaded here.
                 let agy_bin = agy_usage::source::agy_bin();
                 agy_usage::tui::run(&data_dir, cli.tight_threshold, &agy_bin, clock)?;
             }
         }
         Commands::Html { open, out } => {
-            let samples_path = data_dir.join("samples.jsonl");
-            let loaded = agy_usage::store::load(&samples_path)?;
-            if loaded.skipped > 0 {
-                eprintln!("warning: skipped {} corrupt lines", loaded.skipped);
-            }
-            let reports = agy_usage::forecast::analyze(&loaded.samples, cli.tight_threshold);
-            let html_content = agy_usage::html::render(
-                &reports,
-                Utc::now(),
+            let now = Utc::now();
+            let reports = load_reports(
+                &data_dir.join("samples.jsonl"),
+                now,
                 cli.history_days,
-                cli.clock.resolve(),
-            );
+                cli.tight_threshold,
+            )?;
+            let html_content =
+                agy_usage::html::render(&reports, now, cli.history_days, cli.clock.resolve());
             let out_path = out.unwrap_or_else(|| data_dir.join("dashboard.html"));
             write_html_atomic(&out_path, &html_content)?;
             println!("wrote HTML dashboard to {}", out_path.display());

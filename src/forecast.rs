@@ -294,7 +294,57 @@ pub fn prognose(current: &[Sample], tight: f64) -> Prognosis {
     }
 }
 
+/// Slack loaded before the display cutoff: the longest known quota window (weekly,
+/// 7 days) plus one day for collection gaps and clock skew.
+const ANALYSIS_MARGIN_DAYS: i64 = 8;
+
+/// Oldest sample timestamp to load for analyzing and displaying `history_days` of
+/// history. Use with [`analyze_since`].
+pub fn analysis_cutoff(now: DateTime<Utc>, history_days: u32) -> DateTime<Utc> {
+    Duration::try_days(i64::from(history_days) + ANALYSIS_MARGIN_DAYS)
+        .and_then(|d| now.checked_sub_signed(d))
+        .unwrap_or(DateTime::<Utc>::MIN_UTC)
+}
+
+/// Whether samples loaded from [`analysis_cutoff`] onwards can be analyzed with
+/// [`analyze_since`]. Buckets whose window length is unknown (see [`window_length`])
+/// have no bounded lookback, so their prognosis may depend on arbitrarily old samples
+/// and the full history must be analyzed instead.
+pub fn supports_bounded_analysis(samples: &[Sample]) -> bool {
+    samples.iter().all(|s| window_length(&s.window).is_some())
+}
+
+/// Analyzes samples loaded from `cutoff` onwards (see [`analysis_cutoff`]).
+///
+/// Reports exactly the buckets whose prognosis inputs lie entirely inside the loaded
+/// range: those whose newest sample is at least one rate lookback (see [`lookback`])
+/// after `cutoff`. For these, the prognosis, window start, and history after `cutoff`
+/// match [`analyze`] on the full history (`current` may be cut at `cutoff`). Buckets
+/// sampled only closer to (or before) the cutoff are omitted rather than reported with
+/// truncated data. Requires [`supports_bounded_analysis`]; buckets with an unknown
+/// window are omitted.
+pub fn analyze_since(samples: Vec<Sample>, cutoff: DateTime<Utc>, tight: f64) -> Vec<BucketReport> {
+    let mut reports = analyze_owned(samples, tight);
+    reports.retain(|r| {
+        let newest = r.history.last().map(|s| s.ts);
+        match (newest, lookback(&r.window)) {
+            (Some(newest), Some(lb)) => newest
+                .checked_sub_signed(lb)
+                .is_some_and(|start| start >= cutoff),
+            _ => false,
+        }
+    });
+    reports
+}
+
+/// Analyzes borrowed samples. Clones every sample; prefer [`analyze_owned`] when the
+/// caller does not need to keep `samples`.
 pub fn analyze(samples: &[Sample], tight: f64) -> Vec<BucketReport> {
+    analyze_owned(samples.to_vec(), tight)
+}
+
+/// Analyzes samples, moving them into the per-bucket histories without cloning.
+pub fn analyze_owned(samples: Vec<Sample>, tight: f64) -> Vec<BucketReport> {
     if samples.is_empty() {
         return Vec::new();
     }
@@ -310,21 +360,43 @@ pub fn analyze(samples: &[Sample], tight: f64) -> Vec<BucketReport> {
     }
 
     // Older groups
-    for s in samples {
+    for s in &samples {
         if !group_order.contains(&s.group) {
             group_order.push(s.group.clone());
         }
     }
 
-    // Group samples by (group, bucket_id)
-    use std::collections::BTreeMap;
-    let mut by_bucket: BTreeMap<(String, String), Vec<Sample>> = BTreeMap::new();
-    for s in samples {
-        by_bucket
-            .entry((s.group.clone(), s.bucket_id.clone()))
-            .or_default()
-            .push(s.clone());
+    // Groups whose weekly quota is exhausted in the latest batch (used to detect
+    // 5h buckets that stopped being reported because the weekly limit was reached).
+    let mut weekly_exhausted_groups: Vec<&str> = Vec::new();
+    for s in samples.iter().filter(|s| s.ts == latest_ts) {
+        if s.window == "weekly"
+            && s.remaining <= 0.005
+            && !weekly_exhausted_groups.contains(&s.group.as_str())
+        {
+            weekly_exhausted_groups.push(&s.group);
+        }
     }
+    let weekly_exhausted_groups: Vec<String> = weekly_exhausted_groups
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+
+    // Group samples by (group, bucket_id). There are only a handful of buckets, so a
+    // linear scan over borrowed keys avoids allocating a lookup key per sample.
+    let mut by_bucket: Vec<((String, String), Vec<Sample>)> = Vec::new();
+    for s in samples {
+        match by_bucket
+            .iter_mut()
+            .find(|((g, b), _)| *g == s.group && *b == s.bucket_id)
+        {
+            Some((_, history)) => history.push(s),
+            None => by_bucket.push(((s.group.clone(), s.bucket_id.clone()), vec![s])),
+        }
+    }
+    // Deterministic (group, bucket_id) order, as the previous BTreeMap gave; the
+    // final report sort below fully determines the output order regardless.
+    by_bucket.sort_by(|(a, _), (b, _)| a.cmp(b));
 
     let mut reports = Vec::new();
 
@@ -341,12 +413,7 @@ pub fn analyze(samples: &[Sample], tight: f64) -> Vec<BucketReport> {
         // Detect if a 5h bucket was skipped in collection because weekly limit was reached.
         let is_orphaned_by_weekly_limit =
             if last.window == "5h" && !last.disabled && last.ts < latest_ts {
-                samples.iter().any(|s| {
-                    s.group == group
-                        && s.window == "weekly"
-                        && s.ts == latest_ts
-                        && s.remaining <= 0.005
-                })
+                weekly_exhausted_groups.contains(&group)
             } else {
                 false
             };
@@ -1051,5 +1118,234 @@ mod tests {
             status: Status::WillRunOut,
         };
         assert_eq!(p.status_label(now), "❌ in 45m");
+    }
+
+    /// 5-minute samples over `days` days ending at `now` for a bucket that resets every
+    /// `window` (phase-shifted by `phase`), burning linearly from 100% within a window.
+    fn synth_bucket(
+        now: DateTime<Utc>,
+        days: i64,
+        group: &str,
+        bucket_id: &str,
+        window: &str,
+        phase: Duration,
+    ) -> Vec<Sample> {
+        let win = window_length(window).unwrap();
+        let start = now - Duration::days(days);
+        let mut out = Vec::new();
+        let mut ts = start;
+        while ts <= now {
+            let since = (ts - start + phase)
+                .num_seconds()
+                .rem_euclid(win.num_seconds());
+            let reset = ts + Duration::seconds(win.num_seconds() - since);
+            let remaining = 1.0 - 0.9 * since as f64 / win.num_seconds() as f64;
+            out.push(Sample {
+                ts,
+                group: group.to_string(),
+                bucket_id: bucket_id.to_string(),
+                window: window.to_string(),
+                remaining,
+                reset_time: Some(reset),
+                disabled: false,
+            });
+            ts += Duration::minutes(5);
+        }
+        out
+    }
+
+    fn synth_store(now: DateTime<Utc>, days: i64) -> Vec<Sample> {
+        let mut all = Vec::new();
+        all.extend(synth_bucket(
+            now,
+            days,
+            "G",
+            "g-weekly",
+            "weekly",
+            Duration::hours(30),
+        ));
+        all.extend(synth_bucket(
+            now,
+            days,
+            "G",
+            "g-5h",
+            "5h",
+            Duration::minutes(70),
+        ));
+        all.extend(synth_bucket(
+            now,
+            days,
+            "P",
+            "p-weekly",
+            "weekly",
+            Duration::days(3),
+        ));
+        all.sort_by_key(|s| s.ts);
+        all
+    }
+
+    #[test]
+    fn analysis_cutoff_adds_margin_and_saturates() {
+        let now = base_time();
+        assert_eq!(analysis_cutoff(now, 30), now - Duration::days(38));
+        assert_eq!(analysis_cutoff(now, 0), now - Duration::days(8));
+        assert_eq!(analysis_cutoff(now, 36500), now - Duration::days(36508));
+        assert_eq!(analysis_cutoff(now, u32::MAX), DateTime::<Utc>::MIN_UTC);
+    }
+
+    #[test]
+    fn analyze_owned_matches_borrowed_analyze() {
+        let samples = synth_store(base_time(), 20);
+        assert_eq!(
+            analyze_owned(samples.clone(), 0.10),
+            analyze(&samples, 0.10)
+        );
+    }
+
+    #[test]
+    fn bounded_history_preserves_prognosis_and_displayed_range() {
+        let now = base_time();
+        let history_days = 30;
+        let full = synth_store(now, 90);
+        let cutoff = analysis_cutoff(now, history_days);
+        let bounded: Vec<Sample> = full.iter().filter(|s| s.ts >= cutoff).cloned().collect();
+        assert!(bounded.len() < full.len());
+        assert!(supports_bounded_analysis(&bounded));
+
+        let full_reports = analyze(&full, 0.10);
+        let bounded_reports = analyze_since(bounded, cutoff, 0.10);
+        assert_eq!(full_reports.len(), 3);
+        assert_eq!(bounded_reports.len(), full_reports.len());
+
+        let display_cutoff = now - Duration::days(i64::from(history_days));
+        for (f, b) in full_reports.iter().zip(&bounded_reports) {
+            assert_eq!((&f.group, &f.bucket_id), (&b.group, &b.bucket_id));
+            assert_eq!(f.window, b.window);
+            assert_eq!(f.window_start, b.window_start, "{}", f.bucket_id);
+            assert_eq!(f.current, b.current, "{}", f.bucket_id);
+            assert_eq!(f.prognosis, b.prognosis, "{}", f.bucket_id);
+            let shown = |r: &BucketReport| -> Vec<Sample> {
+                r.history
+                    .iter()
+                    .filter(|s| s.ts >= display_cutoff)
+                    .cloned()
+                    .collect()
+            };
+            assert_eq!(shown(f), shown(b), "{}", f.bucket_id);
+            let shown_boundaries = |r: &BucketReport| -> Vec<DateTime<Utc>> {
+                r.boundaries
+                    .iter()
+                    .copied()
+                    .filter(|&t| t >= display_cutoff)
+                    .collect()
+            };
+            assert!(!shown_boundaries(f).is_empty());
+            assert_eq!(shown_boundaries(f), shown_boundaries(b), "{}", f.bucket_id);
+            // Bounded analysis never invents samples older than the load cutoff.
+            assert!(b.history.iter().all(|s| s.ts >= cutoff));
+        }
+    }
+
+    #[test]
+    fn bounded_history_drops_only_buckets_without_complete_rate_inputs() {
+        let now = base_time();
+        let cutoff = analysis_cutoff(now, 30);
+        let mut full = synth_store(now, 20);
+        // Stopped being reported 40 days ago: entirely before the cutoff.
+        full.extend(synth_bucket(
+            now - Duration::days(40),
+            2,
+            "Old",
+            "old-5h",
+            "5h",
+            Duration::zero(),
+        ));
+        // Last sampled 12h after the cutoff: its 24h rate lookback straddles the
+        // cutoff, so a bounded prognosis would be computed from truncated data.
+        let edge_end = cutoff + Duration::hours(12);
+        full.extend(synth_bucket(
+            edge_end,
+            3,
+            "Edge",
+            "edge-weekly",
+            "weekly",
+            Duration::zero(),
+        ));
+        // Last sampled 2 days after the cutoff: complete lookback, so it is kept even
+        // though its window started before the cutoff.
+        let kept_end = cutoff + Duration::days(2);
+        full.extend(synth_bucket(
+            kept_end,
+            9,
+            "Kept",
+            "kept-weekly",
+            "weekly",
+            Duration::days(1),
+        ));
+        let full_reports = analyze(&full, 0.10);
+        assert_eq!(full_reports.len(), 6);
+
+        let bounded: Vec<Sample> = full.into_iter().filter(|s| s.ts >= cutoff).collect();
+        let reports = analyze_since(bounded, cutoff, 0.10);
+        let ids: Vec<&str> = reports.iter().map(|r| r.bucket_id.as_str()).collect();
+        assert_eq!(ids, vec!["g-weekly", "g-5h", "p-weekly", "kept-weekly"]);
+
+        let kept_full = full_reports
+            .iter()
+            .find(|r| r.bucket_id == "kept-weekly")
+            .unwrap();
+        let kept = reports
+            .iter()
+            .find(|r| r.bucket_id == "kept-weekly")
+            .unwrap();
+        assert!(kept_full.window_start.unwrap() < cutoff);
+        assert!(kept_full.prognosis.rate_per_h.is_some());
+        assert_eq!(kept.prognosis, kept_full.prognosis);
+        assert_eq!(kept.window_start, kept_full.window_start);
+    }
+
+    #[test]
+    fn unknown_windows_require_full_history() {
+        let now = base_time();
+        let mut samples = synth_store(now, 2);
+        assert!(supports_bounded_analysis(&samples));
+        assert!(supports_bounded_analysis(&[]));
+        let mut monthly = samples[0].clone();
+        monthly.bucket_id = "g-monthly".to_string();
+        monthly.window = "monthly".to_string();
+        samples.push(monthly);
+        assert!(!supports_bounded_analysis(&samples));
+        // analyze_since never reports a bucket it cannot bound.
+        let reports = analyze_since(samples, now - Duration::days(30), 0.10);
+        assert!(reports.iter().all(|r| r.window != "monthly"));
+        assert_eq!(reports.len(), 3);
+    }
+
+    #[test]
+    fn orphan_detection_ignores_exhausted_weekly_of_other_group() {
+        let t_old = base_time() - Duration::hours(8);
+        let t_latest = base_time();
+        let mk = |ts, group: &str, id: &str, window: &str, remaining| Sample {
+            ts,
+            group: group.to_string(),
+            bucket_id: id.to_string(),
+            window: window.to_string(),
+            remaining,
+            reset_time: Some(ts + Duration::hours(5)),
+            disabled: false,
+        };
+        let samples = vec![
+            mk(t_old, "A", "a-5h", "5h", 0.83),
+            mk(t_latest, "A", "a-weekly", "weekly", 0.40),
+            // Exhausted, but in a different group; must not orphan A's 5h bucket.
+            mk(t_latest, "B", "b-weekly", "weekly", 0.0),
+            // Exhausted in an older batch only; must not count either.
+            mk(t_old, "A", "a-weekly", "weekly", 0.0),
+        ];
+        let reports = analyze(&samples, 0.10);
+        let rep_5h = reports.iter().find(|r| r.bucket_id == "a-5h").unwrap();
+        assert_ne!(rep_5h.prognosis.status, Status::Disabled);
+        assert!(rep_5h.window_start.is_some());
+        assert_eq!(rep_5h.prognosis.last_sample, t_old);
     }
 }
