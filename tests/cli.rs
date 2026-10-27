@@ -1,5 +1,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::process::Command;
 use tempfile::tempdir;
 
@@ -400,6 +401,104 @@ fn is_yyyy_mm_dd(s: &str) -> bool {
         && bytes[8..10].iter().all(u8::is_ascii_digit)
 }
 
+fn latest_changelog_release_date<'a>(ver: &str, changelog: &'a str) -> Result<&'a str, String> {
+    let expected_header = format!("## [{ver}] - ");
+    let latest_release_line = changelog
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("## [") && *line != "## [Unreleased]");
+    match latest_release_line {
+        Some(line) if line.starts_with(&expected_header) => {
+            let date_part = &line[expected_header.len()..];
+            if !is_yyyy_mm_dd(date_part) {
+                return Err(format!(
+                    "CHANGELOG.md release header '{line}' does not have a valid YYYY-MM-DD date"
+                ));
+            }
+            Ok(date_part)
+        }
+        _ => Err(format!(
+            "CHANGELOG.md is missing release section header '{expected_header}<YYYY-MM-DD>' as latest release"
+        )),
+    }
+}
+
+fn read_png_software_stamps(png_bytes: &[u8], label: &str) -> Result<Vec<String>, String> {
+    const PNG_SIG: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if !png_bytes.starts_with(PNG_SIG) {
+        return Err(format!("{label} is not a valid PNG"));
+    }
+
+    let mut pos = PNG_SIG.len();
+    let mut stamps = Vec::new();
+    let mut saw_iend = false;
+
+    while pos < png_bytes.len() {
+        if pos + 12 > png_bytes.len() {
+            return Err(format!(
+                "{label} has a truncated PNG chunk header at offset {pos}"
+            ));
+        }
+        let len = u32::from_be_bytes(png_bytes[pos..pos + 4].try_into().unwrap()) as usize;
+        let chunk_type = &png_bytes[pos + 4..pos + 8];
+        let Some(chunk_end) = pos.checked_add(12).and_then(|n| n.checked_add(len)) else {
+            return Err(format!("{label} has a PNG chunk length overflow at {pos}"));
+        };
+        if chunk_end > png_bytes.len() {
+            return Err(format!("{label} has a truncated PNG chunk at offset {pos}"));
+        }
+        let data = &png_bytes[pos + 8..pos + 8 + len];
+
+        if chunk_type == b"tEXt" && data.starts_with(b"Software\0") {
+            let val = std::str::from_utf8(&data["Software\0".len()..])
+                .map_err(|_| format!("{label} has invalid UTF-8 in PNG Software chunk"))?;
+            stamps.push(val.to_string());
+        }
+
+        if chunk_type == b"IEND" {
+            if len != 0 || chunk_end != png_bytes.len() {
+                return Err(format!("{label} has a malformed PNG IEND chunk"));
+            }
+            saw_iend = true;
+            break;
+        }
+
+        pos = chunk_end;
+    }
+
+    if !saw_iend {
+        return Err(format!("{label} is missing PNG IEND chunk"));
+    }
+
+    Ok(stamps)
+}
+
+fn verify_screenshot_stamps(
+    ver: &str,
+    changelog: &str,
+    screenshots: &[(&str, &[u8])],
+) -> Result<(), String> {
+    let release_date = latest_changelog_release_date(ver, changelog)?;
+    let expected_stamp = format!("agy-usage v{ver} ({release_date})");
+
+    for &(label, png_bytes) in screenshots {
+        let stamps = read_png_software_stamps(png_bytes, label)?;
+        if stamps.is_empty() {
+            return Err(format!(
+                "{label} is missing PNG Software metadata stamp (expected `{expected_stamp}`); run `cargo run --example generate_screenshots`"
+            ));
+        }
+        if stamps.as_slice() != [expected_stamp.as_str()] {
+            return Err(format!(
+                "{label} PNG Software stamp `{}` is out of sync with v{ver} ({release_date}); run `cargo run --example generate_screenshots`",
+                stamps.join(", ")
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn verify_release_sync(
     ver: &str,
     readme: &str,
@@ -435,26 +534,7 @@ fn verify_release_sync(
         }
     }
 
-    let expected_header = format!("## [{ver}] - ");
-    let latest_release_line = changelog
-        .lines()
-        .map(str::trim)
-        .find(|line| line.starts_with("## [") && *line != "## [Unreleased]");
-    match latest_release_line {
-        Some(line) if line.starts_with(&expected_header) => {
-            let date_part = &line[expected_header.len()..];
-            if !is_yyyy_mm_dd(date_part) {
-                return Err(format!(
-                    "CHANGELOG.md release header '{line}' does not have a valid YYYY-MM-DD date"
-                ));
-            }
-        }
-        _ => {
-            return Err(format!(
-                "CHANGELOG.md is missing release section header '{expected_header}<YYYY-MM-DD>' as latest release"
-            ));
-        }
-    }
+    latest_changelog_release_date(ver, changelog)?;
 
     let expected_link_prefix = format!("[{ver}]: https://github.com/danieljov/agy-usage/");
     let has_matching_link = changelog.lines().map(str::trim).any(|line| {
@@ -491,6 +571,34 @@ fn release_metadata_and_docs_stay_in_sync() {
 
     if let Err(err) = verify_release_sync(ver, &readme, &changelog, &cargo_lock) {
         panic!("Release metadata out of sync with Cargo.toml (v{ver}): {err}");
+    }
+
+    let dash_path = Path::new(manifest_dir).join("assets/screenshots/dashboard.png");
+    let tui_path = Path::new(manifest_dir).join("assets/screenshots/tui.png");
+    let git_dir = Path::new(manifest_dir).join(".git");
+    if git_dir.exists() || dash_path.exists() || tui_path.exists() {
+        let dashboard_png = fs::read(&dash_path).unwrap_or_else(|e| {
+            panic!(
+                "Missing {}: {e}; run `cargo run --example generate_screenshots`",
+                dash_path.display()
+            )
+        });
+        let tui_png = fs::read(&tui_path).unwrap_or_else(|e| {
+            panic!(
+                "Missing {}: {e}; run `cargo run --example generate_screenshots`",
+                tui_path.display()
+            )
+        });
+        if let Err(err) = verify_screenshot_stamps(
+            ver,
+            &changelog,
+            &[
+                ("assets/screenshots/dashboard.png", &dashboard_png),
+                ("assets/screenshots/tui.png", &tui_png),
+            ],
+        ) {
+            panic!("Release screenshots out of sync with Cargo.toml (v{ver}): {err}");
+        }
     }
 
     // Negative boundary assertions: any forgotten file on a version bump must fail
@@ -577,6 +685,106 @@ fn release_metadata_and_docs_stay_in_sync() {
         verify_release_sync(ver, &readme, &updated_changelog_full, &cargo_lock)
             .unwrap_err()
             .contains("CHANGELOG.md is missing release section header")
+    );
+
+    // Screenshot stamp negative and positive boundary assertions
+    let fake_stamped_png = |stamp_ver: &str, stamp_date: &str| -> Vec<u8> {
+        let payload = format!("Software\0agy-usage v{stamp_ver} ({stamp_date})");
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(b"tEXt");
+        out.extend_from_slice(payload.as_bytes());
+        out.extend_from_slice(&[0, 0, 0, 0]);
+        out.extend_from_slice(b"\x00\x00\x00\x00IEND\xae\x42\x60\x82");
+        out
+    };
+
+    let stale_ver_png = fake_stamped_png(ver, "2026-10-25");
+    let fresh_png = fake_stamped_png(next_ver, "2026-10-22");
+    let wrong_date_png = fake_stamped_png(next_ver, "2026-10-14");
+    let unstamped_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00IEND\xae\x42\x60\x82".to_vec();
+
+    // 1. Stale dashboard.png fails when version bumps to 9.9.9
+    assert!(
+        verify_screenshot_stamps(
+            next_ver,
+            &updated_changelog_full,
+            &[
+                ("assets/screenshots/dashboard.png", &stale_ver_png),
+                ("assets/screenshots/tui.png", &fresh_png),
+            ],
+        )
+        .unwrap_err()
+        .contains("assets/screenshots/dashboard.png PNG Software stamp")
+    );
+
+    // 2. Updated dashboard.png + stale tui.png fails on tui.png
+    assert!(
+        verify_screenshot_stamps(
+            next_ver,
+            &updated_changelog_full,
+            &[
+                ("assets/screenshots/dashboard.png", &fresh_png),
+                ("assets/screenshots/tui.png", &stale_ver_png),
+            ],
+        )
+        .unwrap_err()
+        .contains("assets/screenshots/tui.png PNG Software stamp")
+    );
+
+    // 3. Matching version (9.9.9) but mismatched release date fails
+    assert!(
+        verify_screenshot_stamps(
+            next_ver,
+            &updated_changelog_full,
+            &[
+                ("assets/screenshots/dashboard.png", &fresh_png),
+                ("assets/screenshots/tui.png", &wrong_date_png),
+            ],
+        )
+        .unwrap_err()
+        .contains("is out of sync with v9.9.9 (2026-10-22)")
+    );
+
+    // 4. Valid PNG without a Software tEXt chunk fails
+    assert!(
+        verify_screenshot_stamps(
+            next_ver,
+            &updated_changelog_full,
+            &[
+                ("assets/screenshots/dashboard.png", &unstamped_png),
+                ("assets/screenshots/tui.png", &fresh_png),
+            ],
+        )
+        .unwrap_err()
+        .contains("is missing PNG Software metadata stamp")
+    );
+
+    // 5. Non-PNG bytes fail
+    assert!(
+        verify_screenshot_stamps(
+            next_ver,
+            &updated_changelog_full,
+            &[
+                ("assets/screenshots/dashboard.png", b"not a png"),
+                ("assets/screenshots/tui.png", &fresh_png),
+            ],
+        )
+        .unwrap_err()
+        .contains("is not a valid PNG")
+    );
+
+    // 6. Both PNGs stamped with 9.9.9 (2026-10-22) pass
+    assert!(
+        verify_screenshot_stamps(
+            next_ver,
+            &updated_changelog_full,
+            &[
+                ("assets/screenshots/dashboard.png", &fresh_png),
+                ("assets/screenshots/tui.png", &fresh_png),
+            ],
+        )
+        .is_ok()
     );
 }
 

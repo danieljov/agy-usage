@@ -36,8 +36,12 @@ unicode-width = "0.2"
 name = "agy-usage"
 path = "src/main.rs"
 
-# Run the demo generator's unit tests as part of `cargo test` so the
-# GitHub Pages build input is verified in CI.
+# Run the demo and screenshot generators' unit tests as part of `cargo test`
+# so the GitHub Pages build input and screenshot renderer are verified in CI.
 [[example]]
 name = "generate_demo"
+test = true
+
+[[example]]
+name = "generate_screenshots"
 test = true

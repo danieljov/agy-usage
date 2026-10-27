@@ -17,7 +17,8 @@ use agy_usage::forecast::{self, BucketReport};
 use agy_usage::html;
 use agy_usage::tui::{self, ViewState};
 use anyhow::Context;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
+use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 use unicode_width::UnicodeWidthStr;
 
@@ -99,13 +100,136 @@ fn escape_html(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn render_tui_to_html(
+/// Parses the latest `## [x.y.z] - YYYY-MM-DD` release date from `CHANGELOG.md`
+/// and returns `(date_str, YYYY-MM-DDT14:00:00Z)`.
+fn parse_latest_release_timestamp(changelog: &str) -> anyhow::Result<(String, DateTime<Utc>)> {
+    let release_line = changelog
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("## [") && !line.starts_with("## [Unreleased]"))
+        .ok_or_else(|| anyhow::anyhow!("No `## [x.y.z] - YYYY-MM-DD` section in CHANGELOG.md"))?;
+
+    let (_, date_part) = release_line.split_once("] - ").ok_or_else(|| {
+        anyhow::anyhow!("Malformed release header `{release_line}` in CHANGELOG.md")
+    })?;
+    let date_str = date_part.trim().to_string();
+    let naive_date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
+        .with_context(|| format!("Invalid release date `{date_str}` in CHANGELOG.md"))?;
+    let ts = naive_date
+        .and_hms_opt(14, 0, 0)
+        .expect("14:00:00 is a valid time")
+        .and_utc();
+    Ok((date_str, ts))
+}
+
+/// Formats the canonical PNG `Software` stamp for the current package version and release date.
+fn expected_software_stamp(date_str: &str) -> String {
+    format!("agy-usage v{} ({date_str})", env!("CARGO_PKG_VERSION"))
+}
+
+/// Computes ISO 3309 / PNG CRC-32 over `chunk_type || data`.
+fn crc32_png(chunk_type: &[u8; 4], data: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for &b in chunk_type.iter().chain(data.iter()) {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xedb8_8320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    !crc
+}
+
+/// Walks the PNG chunks in `png_bytes`, strips any existing `Software` `tEXt` chunk,
+/// and inserts a fresh `tEXt` chunk (`Software\0{software_value}`) immediately before `IEND`.
+fn inject_png_software_chunk(png_bytes: &[u8], software_value: &str) -> anyhow::Result<Vec<u8>> {
+    const PNG_SIG: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    anyhow::ensure!(
+        png_bytes.starts_with(PNG_SIG),
+        "Input is not a valid PNG file (missing 8-byte PNG signature)"
+    );
+
+    let mut out = Vec::with_capacity(png_bytes.len() + 64);
+    out.extend_from_slice(PNG_SIG);
+
+    let mut pos = PNG_SIG.len();
+    let mut saw_iend = false;
+
+    while pos < png_bytes.len() {
+        anyhow::ensure!(
+            pos + 12 <= png_bytes.len(),
+            "Truncated PNG chunk header at byte offset {pos}"
+        );
+        let len = u32::from_be_bytes(png_bytes[pos..pos + 4].try_into().unwrap()) as usize;
+        let chunk_type: [u8; 4] = png_bytes[pos + 4..pos + 8].try_into().unwrap();
+        let chunk_end = pos
+            .checked_add(12)
+            .and_then(|n| n.checked_add(len))
+            .ok_or_else(|| anyhow::anyhow!("PNG chunk length overflow at offset {pos}"))?;
+        anyhow::ensure!(
+            chunk_end <= png_bytes.len(),
+            "Truncated PNG chunk `{}` at byte offset {pos}",
+            String::from_utf8_lossy(&chunk_type)
+        );
+        let data = &png_bytes[pos + 8..pos + 8 + len];
+
+        if &chunk_type == b"tEXt" && data.starts_with(b"Software\0") {
+            // Skip any existing `Software` tEXt chunk so stamping is idempotent.
+            pos = chunk_end;
+            continue;
+        }
+
+        if &chunk_type == b"IEND" {
+            anyhow::ensure!(len == 0, "PNG IEND chunk must have length 0, got {len}");
+            anyhow::ensure!(
+                chunk_end == png_bytes.len(),
+                "Unexpected trailing bytes after PNG IEND chunk"
+            );
+
+            let payload = format!("Software\0{software_value}");
+            let payload_bytes = payload.as_bytes();
+            let text_type = b"tEXt";
+            let crc = crc32_png(text_type, payload_bytes);
+
+            out.extend_from_slice(&(payload_bytes.len() as u32).to_be_bytes());
+            out.extend_from_slice(text_type);
+            out.extend_from_slice(payload_bytes);
+            out.extend_from_slice(&crc.to_be_bytes());
+
+            out.extend_from_slice(&png_bytes[pos..chunk_end]);
+            saw_iend = true;
+            break;
+        }
+
+        out.extend_from_slice(&png_bytes[pos..chunk_end]);
+        pos = chunk_end;
+    }
+
+    anyhow::ensure!(saw_iend, "PNG file is missing terminal IEND chunk");
+    Ok(out)
+}
+
+/// Reads a PNG file from `path`, injects the `Software` metadata stamp, and writes it back.
+fn stamp_png_file(path: &Path, software_value: &str) -> anyhow::Result<()> {
+    let raw = std::fs::read(path)
+        .with_context(|| format!("Failed to read screenshot {}", path.display()))?;
+    let stamped = inject_png_software_chunk(&raw, software_value)
+        .with_context(|| format!("Failed to stamp screenshot {}", path.display()))?;
+    std::fs::write(path, stamped)
+        .with_context(|| format!("Failed to write stamped screenshot {}", path.display()))?;
+    Ok(())
+}
+
+fn render_tui_buffer(
     reports: &[BucketReport],
     now: DateTime<Utc>,
     width: u16,
     height: u16,
     clock: ClockFormat,
-) -> String {
+) -> Buffer {
     let backend = ratatui::backend::TestBackend::new(width, height);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
     let state = ViewState {
@@ -116,7 +240,12 @@ fn render_tui_to_html(
     terminal
         .draw(|f| tui::draw(f, reports, &state, now))
         .expect("failed to draw frame");
-    let buffer = terminal.backend().buffer();
+    terminal.backend().buffer().clone()
+}
+
+fn buffer_to_html(buffer: &Buffer) -> String {
+    let width = buffer.area.width;
+    let height = buffer.area.height;
 
     let mut rows_html = String::new();
     for y in 0..height {
@@ -139,12 +268,25 @@ fn render_tui_to_html(
                 styles.push("font-weight:bold".into());
             }
 
-            let cell_width_px = if w > 1 { w * 9 } else { 9 };
             let style_attr = if styles.is_empty() {
                 String::new()
             } else {
                 format!(";{}", styles.join(";"))
             };
+
+            if sym == "⚠" && x + 1 < width && buffer[(x + 1, y)].symbol() == " " {
+                // `Status::Tight` uses `"⚠  tight"` (two spaces) because `U+26A0` has
+                // unicode-width 1 whereas `✅` and `❌` have width 2. Rendering `⚠\u{fe0f}`
+                // across the 2-cell (18px) span selects emoji presentation (`Noto Color Emoji`)
+                // at the exact same 2-column width as `✅` and `❌` while keeping `"tight"` aligned.
+                rows_html.push_str(&format!(
+                    "<span class=\"cell\" style=\"width:18px{style_attr}\">⚠\u{fe0f}</span>"
+                ));
+                x += 2;
+                continue;
+            }
+
+            let cell_width_px = if w > 1 { w * 9 } else { 9 };
 
             if let Some(box_cls) = box_class(sym) {
                 rows_html.push_str(&format!(
@@ -344,11 +486,32 @@ fn render_tui_to_html(
     )
 }
 
+fn render_tui_to_html(
+    reports: &[BucketReport],
+    now: DateTime<Utc>,
+    width: u16,
+    height: u16,
+    clock: ClockFormat,
+) -> String {
+    let buffer = render_tui_buffer(reports, now, width, height, clock);
+    buffer_to_html(&buffer)
+}
+
 fn main() -> anyhow::Result<()> {
+    // SAFETY: called at the very start of `main` before any threads are spawned,
+    // ensuring `chrono::Local` formats TUI timestamps deterministically in UTC.
+    unsafe {
+        std::env::set_var("TZ", "UTC");
+    }
+
     let chrome_bin = resolve_chrome_bin()?;
     println!("Using Chrome/Chromium binary: {chrome_bin}");
 
-    let now = Utc::now();
+    let changelog = include_str!("../CHANGELOG.md");
+    let (release_date, now) = parse_latest_release_timestamp(changelog)?;
+    let software_stamp = expected_software_stamp(&release_date);
+    println!("Generating release screenshots for {software_stamp} (now = {now})");
+
     let samples = generate_synthetic_samples(now);
     let reports = forecast::analyze(&samples, 0.10);
 
@@ -366,6 +529,14 @@ fn main() -> anyhow::Result<()> {
     // 1. Render and capture HTML dashboard
     let html_content = html::render(&reports, now, 30, ClockFormat::H24);
     let html_content = html_content
+        .replacen(
+            "const data = ",
+            &format!(
+                "Date.now = () => {};\n        const data = ",
+                now.timestamp_millis()
+            ),
+            1,
+        )
         .replace(
             "maintainAspectRatio: false,",
             "maintainAspectRatio: false, animation: false,",
@@ -376,6 +547,10 @@ fn main() -> anyhow::Result<()> {
             "transition: none !important;",
         );
 
+    anyhow::ensure!(
+        html_content.contains("Date.now = () =>"),
+        "Failed to inject Date.now override into dashboard HTML"
+    );
     anyhow::ensure!(
         html_content.contains("animation: false,"),
         "Failed to inject 'animation: false,' into dashboard HTML"
@@ -404,10 +579,14 @@ fn main() -> anyhow::Result<()> {
 
     println!("Capturing HTML dashboard screenshot...");
     let chrome_dash = Command::new(&chrome_bin)
+        .env("TZ", "UTC")
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_ALL", "en_US.UTF-8")
         .args([
             "--headless=new",
             "--disable-gpu",
             "--hide-scrollbars",
+            "--lang=en-US",
             "--window-size=1280,1080",
             &format!("--screenshot={}", dashboard_png.display()),
             &format!("file://{}", dashboard_html_path.canonicalize()?.display()),
@@ -422,21 +601,26 @@ fn main() -> anyhow::Result<()> {
             String::from_utf8_lossy(&chrome_dash.stderr)
         );
     }
-    println!("Captured {}", dashboard_png.display());
+    stamp_png_file(&dashboard_png, &software_stamp)?;
+    println!("Captured and stamped {}", dashboard_png.display());
 
     // 2. Render and capture TUI dashboard
-    let tui_html = render_tui_to_html(&reports, now, 110, 27, ClockFormat::H24);
+    let tui_html = render_tui_to_html(&reports, now, 122, 27, ClockFormat::H24);
     let tui_html_path = target_dir.join("demo_tui.html");
     std::fs::write(&tui_html_path, tui_html)?;
 
     let tui_png = screenshots_dir.join("tui.png");
     println!("Capturing TUI screenshot...");
     let chrome_tui = Command::new(&chrome_bin)
+        .env("TZ", "UTC")
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_ALL", "en_US.UTF-8")
         .args([
             "--headless=new",
             "--disable-gpu",
             "--hide-scrollbars",
-            "--window-size=1160,780",
+            "--lang=en-US",
+            "--window-size=1280,780",
             &format!("--screenshot={}", tui_png.display()),
             &format!("file://{}", tui_html_path.canonicalize()?.display()),
         ])
@@ -450,7 +634,8 @@ fn main() -> anyhow::Result<()> {
             String::from_utf8_lossy(&chrome_tui.stderr)
         );
     }
-    println!("Captured {}", tui_png.display());
+    stamp_png_file(&tui_png, &software_stamp)?;
+    println!("Captured and stamped {}", tui_png.display());
 
     // Clean up temporary HTML files unless KEEP_TEMP=1 is set
     let keep_temp = std::env::var("KEEP_TEMP")
@@ -462,4 +647,98 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn parses_latest_release_date_from_changelog() {
+        let changelog = include_str!("../CHANGELOG.md");
+        let (date_str, ts) = parse_latest_release_timestamp(changelog).unwrap();
+        assert_eq!(date_str.len(), 10);
+        assert_eq!(&date_str[4..5], "-");
+        assert_eq!(&date_str[7..8], "-");
+        assert_eq!(
+            ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            format!("{date_str}T14:00:00Z")
+        );
+        assert!(
+            expected_software_stamp(&date_str).starts_with("agy-usage v"),
+            "software stamp must start with agy-usage v"
+        );
+    }
+
+    #[test]
+    fn injects_valid_png_text_chunk_before_iend_idempotently() {
+        assert_eq!(crc32_png(b"IEND", b""), 0xae42_6082);
+        assert_eq!(crc32_png(b"1234", b"56789"), 0xcbf4_3926);
+
+        let minimal_png = [
+            b"\x89PNG\r\n\x1a\n".as_slice(),
+            b"\x00\x00\x00\x00IEND\xae\x42\x60\x82".as_slice(),
+        ]
+        .concat();
+
+        let stamped_once = inject_png_software_chunk(&minimal_png, "agy-usage v0.3.0 (2026-10-25)")
+            .expect("first stamp should succeed");
+        assert!(stamped_once.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(stamped_once.ends_with(b"\x00\x00\x00\x00IEND\xae\x42\x60\x82"));
+
+        let stamped_twice =
+            inject_png_software_chunk(&stamped_once, "agy-usage v0.3.0 (2026-10-25)")
+                .expect("second stamp should succeed idempotently");
+        assert_eq!(
+            stamped_once, stamped_twice,
+            "re-stamping with the same value must be idempotent"
+        );
+    }
+
+    #[test]
+    fn tui_buffer_and_html_render_resets_column_range_hint_and_two_cell_warning_emoji() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 25, 14, 0, 0).unwrap();
+        let samples = generate_synthetic_samples(now);
+        let reports = forecast::analyze(&samples, 0.10);
+        let buffer = render_tui_buffer(&reports, now, 122, 27, ClockFormat::H24);
+
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+
+        assert!(
+            text.contains("Resets"),
+            "expected Resets column in TUI buffer"
+        );
+        assert!(
+            text.contains("resets in 5d"),
+            "expected pane 1 reset suffix"
+        );
+        assert!(
+            text.contains("resets in 2h 45m"),
+            "expected pane 2 reset suffix"
+        );
+        assert!(
+            text.contains("resets in 4d"),
+            "expected pane 3 reset suffix"
+        );
+        assert!(
+            text.contains("resets in 3h 15m"),
+            "expected pane 4 reset suffix"
+        );
+        assert!(text.contains("t: Range"), "expected t: Range footer hint");
+
+        let html = buffer_to_html(&buffer);
+        assert!(html.contains("✅"), "expected on-track emoji in HTML");
+        assert!(html.contains("❌"), "expected will-run-out emoji in HTML");
+        assert!(
+            html.contains("width:18px") && html.contains("⚠\u{fe0f}"),
+            "expected 2-cell 18px emoji presentation for warning symbol in HTML"
+        );
+    }
 }

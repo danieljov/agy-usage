@@ -151,6 +151,13 @@ Displayed times (TUI header, HTML dashboard header, table, chart axes and toolti
 
 ## Releasing & Crates.io Publishing
 
+Before tagging a release:
+1. Update the version in `Cargo.toml` (`cargo check` to update `Cargo.lock`), add the `## [x.y.z] - YYYY-MM-DD` section and comparison link in `CHANGELOG.md`, and update the release download URL in `README.md`.
+2. Regenerate the release screenshots (`assets/screenshots/dashboard.png` and `assets/screenshots/tui.png`) so their embedded `Software` metadata matches the new release version and date (enforced by `cargo test`):
+   ```bash
+   cargo run --example generate_screenshots
+   ```
+
 Pushing a version tag (`v*` matching `Cargo.toml`) triggers `.github/workflows/release.yml`, which verifies formatting, lints, tests, and tag-version alignment, uploads the Linux `x86_64` binary tarball to GitHub Releases, and idempotently publishes the crate to crates.io.
 
 Authentication with crates.io supports two setups:

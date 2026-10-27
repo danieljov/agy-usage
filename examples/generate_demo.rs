@@ -137,4 +137,93 @@ mod tests {
         // Extra positional arguments are rejected
         assert!(parse_out_dir(vec![OsString::from("dir1"), OsString::from("extra")]).is_err());
     }
+
+    #[test]
+    fn synthetic_dataset_covers_active_windows_and_all_status_variants() {
+        use agy_usage::forecast::Status;
+        use chrono::TimeZone;
+
+        let test_times = [
+            Utc.with_ymd_and_hms(2026, 10, 25, 14, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 10, 25, 14, 23, 17)
+                .unwrap()
+                .checked_add_signed(chrono::Duration::nanoseconds(123_456_789))
+                .unwrap(),
+            Utc::now(),
+        ];
+
+        for now in test_times {
+            let samples = demo_data::generate_synthetic_samples(now);
+            let reports = forecast::analyze_owned(samples, TIGHT_THRESHOLD);
+            assert_eq!(reports.len(), 4);
+
+            let by_id = |id: &str| {
+                reports
+                    .iter()
+                    .find(|r| r.bucket_id == id)
+                    .unwrap_or_else(|| panic!("missing bucket {id}"))
+            };
+
+            let expected_ws = [
+                ("gemini-weekly", now - chrono::Duration::days(2)),
+                ("gemini-5h", now - chrono::Duration::minutes(135)),
+                ("3p-weekly", now - chrono::Duration::days(3)),
+                ("3p-5h", now - chrono::Duration::minutes(105)),
+            ];
+
+            for (id, ws) in expected_ws {
+                let rep = by_id(id);
+                assert_eq!(rep.window_start, Some(ws), "{id} window_start");
+                let first_current = rep.current.first().expect("current window non-empty");
+                let last_current = rep.current.last().expect("current window non-empty");
+                assert_eq!(
+                    first_current.ts, ws,
+                    "{id} current series must start at window_start"
+                );
+                assert!(
+                    (first_current.remaining - 1.0).abs() < 1e-6,
+                    "{id} must start at 100% at window_start, got {}",
+                    first_current.remaining
+                );
+                assert_eq!(last_current.ts, now, "{id} current series must end at now");
+                assert_eq!(
+                    rep.boundaries.last().copied(),
+                    Some(ws),
+                    "{id} last boundary must equal active window_start"
+                );
+                assert!(
+                    rep.boundaries.len() >= 4,
+                    "{id} must include multi-window historical boundaries across 30d, got {}",
+                    rep.boundaries.len()
+                );
+                // Negative boundary: no sample in `current` precedes `window_start`, and `current` is non-increasing
+                assert!(rep.current.iter().all(|s| s.ts >= ws));
+                assert!(
+                    rep.current
+                        .windows(2)
+                        .all(|w| w[1].remaining <= w[0].remaining + 1e-9)
+                );
+            }
+
+            let gw = by_id("gemini-weekly");
+            assert_eq!(gw.prognosis.status, Status::OnTrack);
+            assert!((gw.prognosis.remaining_now - 0.784).abs() < 1e-4);
+            assert!((gw.prognosis.at_reset.unwrap() - 0.244).abs() < 1e-3);
+
+            let g5 = by_id("gemini-5h");
+            assert_eq!(g5.prognosis.status, Status::OnTrack);
+            assert!((g5.prognosis.remaining_now - 0.820).abs() < 1e-4);
+            assert!((g5.prognosis.at_reset.unwrap() - 0.600).abs() < 1e-3);
+
+            let cw = by_id("3p-weekly");
+            assert_eq!(cw.prognosis.status, Status::Tight);
+            assert!((cw.prognosis.remaining_now - 0.5968).abs() < 1e-4);
+            assert!((cw.prognosis.at_reset.unwrap() - 0.0592).abs() < 1e-3);
+
+            let c5 = by_id("3p-5h");
+            assert_eq!(c5.prognosis.status, Status::WillRunOut);
+            assert!((c5.prognosis.remaining_now - 0.424).abs() < 1e-4);
+            assert_eq!(c5.prognosis.status_label(now), "❌ in 1h 8m");
+        }
+    }
 }
