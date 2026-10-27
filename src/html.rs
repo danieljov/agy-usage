@@ -293,7 +293,7 @@ mod tests {
         assert!(output.contains("decimation:"));
         assert!(output.contains("algorithm: 'min-max'"));
         assert!(output.contains("toFixed(1)"));
-        assert!(output.contains("pts.length === 1 ? 2 : ((isWeekly || pts.length > 60) ? 0 : 2)"));
+        assert!(output.contains("const actualPointRadius = pts => (pts.length === 1 ? 2 : 0);"));
         assert!(output.contains("pointRadius: actualPointRadius(initialActualPts)"));
         assert!(output.contains("pointHoverRadius: 4"));
         assert!(output.contains("emptyAt"));

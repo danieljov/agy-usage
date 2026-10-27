@@ -422,8 +422,7 @@
 
                 // Actual series
                 const allActualPts = (rep.series || []).map(pt => ({ x: pt[0], y: pt[1] * 100 }));
-                const isWeekly = !!rep.window && rep.window.toLowerCase() === 'weekly';
-                const actualPointRadius = pts => (pts.length === 1 ? 2 : ((isWeekly || pts.length > 60) ? 0 : 2));
+                const actualPointRadius = pts => (pts.length === 1 ? 2 : 0);
                 let actualDataset = null;
                 if (allActualPts.length > 0) {
                     const initialActualPts = allActualPts.filter(pt => pt.x >= initialMin);
