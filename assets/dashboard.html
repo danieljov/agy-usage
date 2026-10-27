@@ -422,18 +422,20 @@
 
                 // Actual series
                 const allActualPts = (rep.series || []).map(pt => ({ x: pt[0], y: pt[1] * 100 }));
+                const isWeekly = !!rep.window && rep.window.toLowerCase() === 'weekly';
+                const actualPointRadius = pts => (pts.length === 1 ? 2 : ((isWeekly || pts.length > 60) ? 0 : 2));
                 let actualDataset = null;
                 if (allActualPts.length > 0) {
-                    const isWeekly = !!rep.window && rep.window.toLowerCase() === 'weekly';
+                    const initialActualPts = allActualPts.filter(pt => pt.x >= initialMin);
                     actualDataset = {
                         label: 'Actual',
-                        data: allActualPts.filter(pt => pt.x >= initialMin),
+                        data: initialActualPts,
                         borderColor: '#38bdf8',
                         backgroundColor: '#38bdf8',
                         borderWidth: 2,
                         borderJoinStyle: 'round',
                         borderCapStyle: 'round',
-                        pointRadius: rep.series.length === 1 ? 2 : ((isWeekly || rep.series.length > 60) ? 0 : 2),
+                        pointRadius: actualPointRadius(initialActualPts),
                         pointHoverRadius: 4,
                         tension: 0,
                     };
@@ -585,9 +587,11 @@
                             if (handled) {
                                 if (actualDataset) {
                                     const minX = chart.options.scales.x.min;
-                                    actualDataset.data = minX != null
+                                    const visiblePts = minX != null
                                         ? allActualPts.filter(pt => pt.x >= minX)
                                         : allActualPts;
+                                    actualDataset.data = visiblePts;
+                                    actualDataset.pointRadius = actualPointRadius(visiblePts);
                                 }
                                 toggleContainer.querySelectorAll('.range-btn').forEach(b => {
                                     const isActive = b === btn;

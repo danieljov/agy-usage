@@ -293,7 +293,8 @@ mod tests {
         assert!(output.contains("decimation:"));
         assert!(output.contains("algorithm: 'min-max'"));
         assert!(output.contains("toFixed(1)"));
-        assert!(output.contains("rep.series.length === 1 ? 2"));
+        assert!(output.contains("pts.length === 1 ? 2 : ((isWeekly || pts.length > 60) ? 0 : 2)"));
+        assert!(output.contains("pointRadius: actualPointRadius(initialActualPts)"));
         assert!(output.contains("pointHoverRadius: 4"));
         assert!(output.contains("emptyAt"));
         assert!(output.contains("❌ now"));
@@ -360,8 +361,13 @@ mod tests {
             "const rawMin = is5h ? (endMs - 5 * 3600 * 1000) : (endMs - 7 * 86400 * 1000);"
         ));
         assert!(output.contains("const initialMin = Math.min(rawMin, lastSampleMs);"));
-        assert!(output.contains("data: allActualPts.filter(pt => pt.x >= initialMin)"));
+        assert!(
+            output.contains(
+                "const initialActualPts = allActualPts.filter(pt => pt.x >= initialMin);"
+            )
+        );
         assert!(output.contains("allActualPts.filter(pt => pt.x >= minX)"));
+        assert!(output.contains("actualDataset.pointRadius = actualPointRadius(visiblePts);"));
         assert!(output.contains("min: initialMin"));
         assert!(output.contains("max: endMs"));
         assert!(output.contains("chart.options.scales.x.min"));
