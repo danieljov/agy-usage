@@ -360,6 +360,8 @@ mod tests {
             "const rawMin = is5h ? (endMs - 5 * 3600 * 1000) : (endMs - 7 * 86400 * 1000);"
         ));
         assert!(output.contains("const initialMin = Math.min(rawMin, lastSampleMs);"));
+        assert!(output.contains("data: allActualPts.filter(pt => pt.x >= initialMin)"));
+        assert!(output.contains("allActualPts.filter(pt => pt.x >= minX)"));
         assert!(output.contains("min: initialMin"));
         assert!(output.contains("max: endMs"));
         assert!(output.contains("chart.options.scales.x.min"));

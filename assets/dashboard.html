@@ -412,12 +412,22 @@
                 const canvas = card.querySelector('canvas');
                 const datasets = [];
 
+                const nowMs = !isNaN(genDate.getTime()) ? genDate.getTime() : Date.now();
+                const resetMs = rep.reset_time ? new Date(rep.reset_time).getTime() : NaN;
+                const rawLastMs = p.last_sample ? new Date(p.last_sample).getTime() : NaN;
+                const lastSampleMs = !isNaN(rawLastMs) ? rawLastMs : nowMs;
+                const endMs = (!isNaN(resetMs) && resetMs > nowMs) ? resetMs : Math.max(nowMs, lastSampleMs);
+                const rawMin = is5h ? (endMs - 5 * 3600 * 1000) : (endMs - 7 * 86400 * 1000);
+                const initialMin = Math.min(rawMin, lastSampleMs);
+
                 // Actual series
-                if (rep.series && rep.series.length > 0) {
+                const allActualPts = (rep.series || []).map(pt => ({ x: pt[0], y: pt[1] * 100 }));
+                let actualDataset = null;
+                if (allActualPts.length > 0) {
                     const isWeekly = !!rep.window && rep.window.toLowerCase() === 'weekly';
-                    datasets.push({
+                    actualDataset = {
                         label: 'Actual',
-                        data: rep.series.map(pt => ({ x: pt[0], y: pt[1] * 100 })),
+                        data: allActualPts.filter(pt => pt.x >= initialMin),
                         borderColor: '#38bdf8',
                         backgroundColor: '#38bdf8',
                         borderWidth: 2,
@@ -426,7 +436,8 @@
                         pointRadius: rep.series.length === 1 ? 2 : ((isWeekly || rep.series.length > 60) ? 0 : 2),
                         pointHoverRadius: 4,
                         tension: 0,
-                    });
+                    };
+                    datasets.push(actualDataset);
                 }
 
                 // Budget line
@@ -484,14 +495,6 @@
                     box.style.borderRadius = '6px';
                     box.innerHTML = '<strong style="color:var(--text);font-size:1.05rem;margin-bottom:0.25rem;">Disabled</strong><span>Weekly limit reached</span>';
                 } else if (typeof Chart !== 'undefined') {
-                    const nowMs = !isNaN(genDate.getTime()) ? genDate.getTime() : Date.now();
-                    const resetMs = rep.reset_time ? new Date(rep.reset_time).getTime() : NaN;
-                    const rawLastMs = p.last_sample ? new Date(p.last_sample).getTime() : NaN;
-                    const lastSampleMs = !isNaN(rawLastMs) ? rawLastMs : nowMs;
-                    const endMs = (!isNaN(resetMs) && resetMs > nowMs) ? resetMs : Math.max(nowMs, lastSampleMs);
-                    const rawMin = is5h ? (endMs - 5 * 3600 * 1000) : (endMs - 7 * 86400 * 1000);
-                    const initialMin = Math.min(rawMin, lastSampleMs);
-
                     const chart = new Chart(canvas, {
                         type: 'line',
                         data: { datasets },
@@ -580,6 +583,12 @@
                             }
 
                             if (handled) {
+                                if (actualDataset) {
+                                    const minX = chart.options.scales.x.min;
+                                    actualDataset.data = minX != null
+                                        ? allActualPts.filter(pt => pt.x >= minX)
+                                        : allActualPts;
+                                }
                                 toggleContainer.querySelectorAll('.range-btn').forEach(b => {
                                     const isActive = b === btn;
                                     b.classList.toggle('active', isActive);
