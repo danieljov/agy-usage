@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-27
+
+### Fixed
+- **In-Window Reservation Hold Smoothing (`forecast::analyze`)**:
+  - `BucketReport::history` and `BucketReport::current` now lift transient in-window reservation hold dips to each reset window's right-to-left non-increasing upper envelope (`smooth_window_holds`) so refunded backend holds do not render as visual chart jitter, while `forecast::prognose` continues to evaluate raw `current` samples and `remaining_now`.
+- **HTML Dashboard Chart Rendering (`assets/dashboard.html`)**:
+  - Added rounded line joins and caps (`borderJoinStyle: 'round'`, `borderCapStyle: 'round'`) to `Actual` chart strokes.
+  - Filtered `Actual` dataset points to the active viewport range (`pt.x >= x.min`) so Chart.js does not draw an off-screen-to-on-screen vertical refill stroke along the left Y-axis border (`x = window_start`), and simplified `pointRadius` (`pts.length === 1 ? 2 : 0`) so marker dots are only drawn when a chart has a single visible sample.
+- **Synthetic Demo Dataset & Release Screenshot Sync (`examples/common/demo_data.rs`, `examples/generate_screenshots.rs`, `tests/cli.rs`)**:
+  - Expanded synthetic demo data from 2 hours to 30 days of window-aligned history (`15m`/`5m` intervals) so Weekly and 5h charts start at `100%` at `window_start` with multi-window reset boundaries across all range toggles (`5h`, `24h`, `7d`, `30d`, `All`).
+  - Anchored `generate_screenshots` deterministically to the latest `CHANGELOG.md` release date in UTC, fixed 2-cell `⚠️` (`⚠\u{fe0f}`) emoji rendering and 122-column TUI layout, and enforced PNG `Software` metadata stamp synchronization in `release_metadata_and_docs_stay_in_sync`.
+
 ## [0.3.0] - 2026-10-25
 
 ### Added
@@ -127,6 +139,7 @@ Initial release of `agy-usage`: quota history, burn-rate prognosis, and interact
   - Standalone, stripped Linux x86_64 binary archives with SHA-256 checksums published via automated GitHub Release workflow.
   - Automated one-line curl installation script (`install.sh`) with automated SHA-256 checksum verification.
 
+[0.3.1]: https://github.com/danieljov/agy-usage/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/danieljov/agy-usage/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/danieljov/agy-usage/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/danieljov/agy-usage/compare/v0.1.3...v0.1.4
