@@ -85,11 +85,36 @@ pub struct BucketReport {
     pub group: String,
     pub bucket_id: String,
     pub window: String,
+    /// Per-bucket samples sorted by timestamp, with refunded in-window reservation
+    /// hold dips lifted to each window's non-increasing upper envelope for display.
     pub history: Vec<Sample>,
+    /// Samples in the active quota window, smoothed to the same non-increasing
+    /// upper envelope as [`Self::history`].
     pub current: Vec<Sample>,
     pub window_start: Option<DateTime<Utc>>,
     pub boundaries: Vec<DateTime<Utc>>,
     pub prognosis: Prognosis,
+}
+
+/// Lifts transient in-window reservation hold dips to the tightest non-increasing
+/// upper envelope supported by later samples in the same reset window.
+///
+/// Within a single quota window, settled remaining quota cannot genuinely increase;
+/// a higher reading at `j > i` proves earlier readings in `i..j` were depressed by an
+/// in-flight hold that later refunded. Disabled samples and the window's final sample
+/// are never modified.
+fn smooth_window_holds(window_samples: &mut [Sample]) {
+    if window_samples.len() < 2 {
+        return;
+    }
+    for i in (0..window_samples.len() - 1).rev() {
+        if !window_samples[i].disabled
+            && !window_samples[i + 1].disabled
+            && window_samples[i].remaining < window_samples[i + 1].remaining
+        {
+            window_samples[i].remaining = window_samples[i + 1].remaining;
+        }
+    }
 }
 
 pub fn window_boundaries(samples: &[Sample]) -> Vec<usize> {
@@ -454,10 +479,21 @@ pub fn analyze_owned(samples: Vec<Sample>, tight: f64) -> Vec<BucketReport> {
             prognose(&current, tight)
         };
 
+        let window = last.window.clone();
+        let mut seg_start = 0;
+        for &seg_end in boundary_indices
+            .iter()
+            .chain(std::iter::once(&history.len()))
+        {
+            smooth_window_holds(&mut history[seg_start..seg_end]);
+            seg_start = seg_end;
+        }
+        smooth_window_holds(&mut current);
+
         reports.push(BucketReport {
             group,
             bucket_id,
-            window: last.window.clone(),
+            window,
             history,
             current,
             window_start,
@@ -1216,7 +1252,15 @@ mod tests {
     fn bounded_history_preserves_prognosis_and_displayed_range() {
         let now = base_time();
         let history_days = 30;
-        let full = synth_store(now, 90);
+        let mut full = synth_store(now, 90);
+        // Inject periodic transient reservation hold dips (-1.5%) mid-window so
+        // bounded vs. full equivalence is verified under suffix-max smoothing,
+        // including across `cutoff` and `display_cutoff`.
+        for (idx, sample) in full.iter_mut().enumerate() {
+            if idx % 17 == 5 && sample.remaining > 0.15 && sample.remaining < 0.95 {
+                sample.remaining -= 0.015;
+            }
+        }
         let cutoff = analysis_cutoff(now, history_days);
         let bounded: Vec<Sample> = full.iter().filter(|s| s.ts >= cutoff).cloned().collect();
         assert!(bounded.len() < full.len());
@@ -1372,5 +1416,103 @@ mod tests {
         assert_ne!(rep_5h.prognosis.status, Status::Disabled);
         assert!(rep_5h.window_start.is_some());
         assert_eq!(rep_5h.prognosis.last_sample, t_old);
+    }
+
+    #[test]
+    fn mid_window_hold_dips_lifted_to_post_refund_envelope_while_prognosis_uses_raw() {
+        let t0 = base_time();
+        let reset_w = t0 + Duration::days(4);
+        let mk = |min_offset: i64, remaining: f64| Sample {
+            ts: t0 + Duration::minutes(min_offset),
+            group: "Gemini Models".to_string(),
+            bucket_id: "gemini-weekly".to_string(),
+            window: "weekly".to_string(),
+            remaining,
+            reset_time: Some(reset_w),
+            disabled: false,
+        };
+
+        // Back-to-back reservation hold dips (at +5m and +15m) that refund at +10m and +20m,
+        // followed by steady burn to +25m and an un-refunded dip at the tail (+30m).
+        let raw_samples = vec![
+            mk(0, 0.5115),
+            mk(5, 0.5084),  // dip 1 (-0.31%)
+            mk(10, 0.5113), // refund 1 -> lifts +5m to 0.5113
+            mk(15, 0.5083), // dip 2 (-0.30%)
+            mk(20, 0.5111), // refund 2 -> lifts +15m to 0.5111 (without clamping +10m!)
+            mk(25, 0.5108), // normal burn
+            mk(30, 0.5075), // un-refunded tail dip -> remains 0.5075
+        ];
+
+        let expected_raw_prognosis = prognose(&raw_samples, 0.10);
+        let reports = analyze(&raw_samples, 0.10);
+        assert_eq!(reports.len(), 1);
+        let rep = &reports[0];
+
+        let expected_smoothed = vec![0.5115, 0.5113, 0.5113, 0.5111, 0.5111, 0.5108, 0.5075];
+        let got_history: Vec<f64> = rep.history.iter().map(|s| s.remaining).collect();
+        let got_current: Vec<f64> = rep.current.iter().map(|s| s.remaining).collect();
+        assert_eq!(got_history, expected_smoothed);
+        assert_eq!(got_current, expected_smoothed);
+
+        // Prognosis is computed from the raw current samples before display smoothing,
+        // and differs from running prognose on the smoothed samples.
+        assert_eq!(rep.prognosis, expected_raw_prognosis);
+        assert_ne!(rep.prognosis, prognose(&rep.current, 0.10));
+        assert_eq!(rep.prognosis.remaining_now, 0.5075);
+
+        // Idempotence: running smooth_window_holds a second time is a no-op.
+        let mut again = rep.current.clone();
+        smooth_window_holds(&mut again);
+        assert_eq!(again, rep.current);
+
+        // Negative boundary: a strictly monotonically non-increasing window is untouched.
+        let monotonic = vec![mk(0, 0.90), mk(5, 0.85), mk(10, 0.85), mk(15, 0.80)];
+        let mut monotonic_smoothed = monotonic.clone();
+        smooth_window_holds(&mut monotonic_smoothed);
+        assert_eq!(monotonic_smoothed, monotonic);
+    }
+
+    #[test]
+    fn window_envelope_does_not_cross_window_boundaries_or_alter_disabled_samples() {
+        let t0 = base_time();
+        let reset_1 = t0 + Duration::hours(5);
+        let reset_2 = t0 + Duration::hours(10);
+        let mk = |min_offset: i64, remaining: f64, reset: Option<DateTime<Utc>>, disabled: bool| {
+            Sample {
+                ts: t0 + Duration::minutes(min_offset),
+                group: "Gemini Models".to_string(),
+                bucket_id: "gemini-5h".to_string(),
+                window: "5h".to_string(),
+                remaining,
+                reset_time: reset,
+                disabled,
+            }
+        };
+
+        let samples = vec![
+            // Window 1: dip at +5m (0.39) refunded to 0.41 at +10m, then burns to 0.38 at +15m.
+            mk(0, 0.45, Some(reset_1), false),
+            mk(5, 0.39, Some(reset_1), false),
+            mk(10, 0.41, Some(reset_1), false),
+            mk(15, 0.38, Some(reset_1), false),
+            // Window 2 (reset boundary at index 4): refills to 1.00, dips to 0.92, refunds to 0.95.
+            mk(305, 1.00, Some(reset_2), false),
+            mk(310, 0.92, Some(reset_2), false),
+            mk(315, 0.95, Some(reset_2), false),
+            // Window 3 (disabled boundary at index 7): disabled samples stay untouched.
+            mk(320, 0.10, None, true),
+            mk(325, 0.90, None, true),
+        ];
+
+        let reports = analyze(&samples, 0.10);
+        assert_eq!(reports.len(), 1);
+        let got: Vec<f64> = reports[0].history.iter().map(|s| s.remaining).collect();
+        // Window 1 must NOT be lifted to 1.00 across the reset boundary at index 4,
+        // and disabled samples at indices 7..=8 must not be smoothed.
+        assert_eq!(
+            got,
+            vec![0.45, 0.41, 0.41, 0.38, 1.00, 0.95, 0.95, 0.10, 0.90]
+        );
     }
 }

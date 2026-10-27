@@ -288,6 +288,8 @@ mod tests {
         assert!(output.contains("mode: 'nearest'"));
         assert!(output.contains("axis: 'x'"));
         assert!(output.contains("tension: 0"));
+        assert!(output.contains("borderJoinStyle: 'round'"));
+        assert!(output.contains("borderCapStyle: 'round'"));
         assert!(output.contains("decimation:"));
         assert!(output.contains("algorithm: 'min-max'"));
         assert!(output.contains("toFixed(1)"));

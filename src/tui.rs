@@ -2401,4 +2401,51 @@ mod tests {
         ));
         assert_eq!(state.message, before);
     }
+
+    #[test]
+    fn chart_viewport_renders_smoothed_envelope_across_window_and_history_ranges() {
+        let t0 = Utc.with_ymd_and_hms(2026, 10, 20, 12, 0, 0).unwrap();
+        let reset = t0 + chrono::Duration::days(5);
+        let mk = |min_offset: i64, remaining: f64| Sample {
+            ts: t0 + chrono::Duration::minutes(min_offset),
+            group: "Gemini Models".to_string(),
+            bucket_id: "gemini-weekly".to_string(),
+            window: "weekly".to_string(),
+            remaining,
+            reset_time: Some(reset),
+            disabled: false,
+        };
+        let samples = vec![
+            mk(0, 0.5115),
+            mk(5, 0.5084),  // reservation hold dip
+            mk(10, 0.5113), // refund
+            mk(15, 0.5083), // reservation hold dip
+            mk(20, 0.5111), // refund
+            mk(25, 0.5108), // steady burn
+        ];
+        let rep = &analyze(&samples, 0.10)[0];
+
+        let expected_ys: Vec<f64> = [0.5115, 0.5113, 0.5113, 0.5111, 0.5111, 0.5108]
+            .into_iter()
+            .map(|r| r * 100.0)
+            .collect();
+        for range in [TimeRange::Window, TimeRange::H24, TimeRange::D7] {
+            let vp = chart_viewport(rep, range).unwrap();
+            let ys: Vec<f64> = vp.actual_pts.iter().map(|&(_, y)| y).collect();
+            assert_eq!(
+                ys, expected_ys,
+                "expected smoothed non-increasing actual_pts for {range:?}"
+            );
+            for pair in ys.windows(2) {
+                assert!(
+                    pair[0] >= pair[1],
+                    "upward jitter remained in {range:?}: {ys:?}"
+                );
+            }
+        }
+
+        // Projection line starts from the latest actual sample (51.08%), matching raw remaining_now.
+        let proj = projection_points(rep, reset);
+        assert_eq!(proj.first().map(|&(_, y)| y), Some(0.5108 * 100.0));
+    }
 }
