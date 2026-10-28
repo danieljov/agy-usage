@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-28
+
 ### Added
+- **Multi-Platform Release Binaries, macOS `launchd` Timer & MSRV CI (`src/timer.rs`, `src/main.rs`, `install.sh`, `.github/workflows/release.yml`, `.github/workflows/ci.yml`)**:
+  - Added macOS `launchd` user agent support (`~/Library/LaunchAgents/com.agy-usage.collect.plist`) in `agy-usage install-timer` / `uninstall-timer` alongside Linux `systemd`, and used `open` on macOS for `agy-usage html --open`.
+  - Expanded `.github/workflows/release.yml` and `install.sh` to build and install pre-compiled binaries for Linux (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`) and macOS (`x86_64-apple-darwin`, `aarch64-apple-darwin`).
+  - Added an MSRV (`1.88`) verification job in `.github/workflows/ci.yml`.
 - **Interactive TUI `?` Help Overlay & HTML Hover Crosshair Sync (`src/tui.rs`, `assets/dashboard.html`, `src/html.rs`, `README.md`)**:
   - Added a toggleable `?` help modal (`Help · Controls & Legend`) in `agy-usage show` displaying keyboard shortcuts, chart series descriptions (`Actual`, `Budget`, `Proj`, `Reset`), and prognosis status definitions (`on track`, `tight`, `in <t>`, `collecting`, `disabled`), with `?: Help` in the status bar (including a compact 80-column fallback that preserves `last sample ...`).
   - Added synchronized hover crosshairs and tooltips across all HTML dashboard charts (`crosshairSyncPlugin` in `assets/dashboard.html`), snapping sibling charts to the nearest visible `Actual` sample within a bounded time tolerance and clearing stale crosshairs on mouseout or time-range toggle.
@@ -151,6 +157,7 @@ Initial release of `agy-usage`: quota history, burn-rate prognosis, and interact
   - Standalone, stripped Linux x86_64 binary archives with SHA-256 checksums published via automated GitHub Release workflow.
   - Automated one-line curl installation script (`install.sh`) with automated SHA-256 checksum verification.
 
+[0.4.0]: https://github.com/danieljov/agy-usage/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/danieljov/agy-usage/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/danieljov/agy-usage/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/danieljov/agy-usage/compare/v0.1.4...v0.2.0

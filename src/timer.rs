@@ -6,6 +6,8 @@ use anyhow::{Context, Result, bail};
 
 use crate::clock::ClockFormat;
 
+pub const LAUNCHD_LABEL: &str = "com.agy-usage.collect";
+
 fn encode_unit_path(path: &Path, escape_dollar: bool) -> Result<String> {
     let abs = std::path::absolute(path)
         .with_context(|| format!("failed to make path absolute: {}", path.display()))?;
@@ -75,6 +77,98 @@ WantedBy=timers.target
     Ok((service, timer))
 }
 
+fn encode_xml_text(s: &str) -> Result<String> {
+    if s.chars().any(|c| c.is_control()) {
+        bail!("string contains control characters: {:?}", s);
+    }
+    let mut escaped = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            other => escaped.push(other),
+        }
+    }
+    Ok(escaped)
+}
+
+fn encode_plist_path(path: &Path) -> Result<String> {
+    let abs = std::path::absolute(path)
+        .with_context(|| format!("failed to make path absolute: {}", path.display()))?;
+    let s = abs
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("path contains invalid UTF-8: {}", abs.display()))?;
+    encode_xml_text(s)
+}
+
+pub fn launchd_plist(
+    exe: &Path,
+    agy_bin: &Path,
+    data_dir: &Path,
+    tight_threshold: f64,
+    history_days: u32,
+    retention_days: u32,
+    clock: Option<ClockFormat>,
+) -> Result<String> {
+    let enc_exe = encode_plist_path(exe)?;
+    let enc_agy = encode_plist_path(agy_bin)?;
+    let enc_data = encode_plist_path(data_dir)?;
+
+    let mut args = vec![
+        enc_exe,
+        "--data-dir".to_string(),
+        enc_data,
+        "--tight-threshold".to_string(),
+        tight_threshold.to_string(),
+        "--history-days".to_string(),
+        history_days.to_string(),
+        "--retention-days".to_string(),
+        retention_days.to_string(),
+    ];
+    if let Some(c) = clock {
+        args.push("--clock".to_string());
+        args.push(c.as_arg().to_string());
+    }
+    args.push("collect".to_string());
+
+    let mut program_args = String::new();
+    for arg in &args {
+        program_args.push_str(&format!("        <string>{arg}</string>\n"));
+    }
+
+    Ok(format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+{program_args}    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>AGY_BIN</key>
+        <string>{enc_agy}</string>
+    </dict>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+"#
+    ))
+}
+
+pub fn launchd_agents_dir() -> Result<PathBuf> {
+    let home = std::env::var("HOME").context("HOME not set")?;
+    Ok(PathBuf::from(home).join("Library").join("LaunchAgents"))
+}
+
 pub fn systemd_user_dir() -> Result<PathBuf> {
     if let Some(config_home) = std::env::var("XDG_CONFIG_HOME")
         .ok()
@@ -90,6 +184,47 @@ pub fn systemd_user_dir() -> Result<PathBuf> {
     }
 }
 
+fn remove_if_exists(p: &Path) -> Result<()> {
+    match fs::remove_file(p) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("failed to remove {}", p.display())),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn bootout_if_loaded(gui_domain: &str, plist_path: &Path) -> Result<()> {
+    use std::process::Stdio;
+
+    let service_target = format!("{gui_domain}/{LAUNCHD_LABEL}");
+    let is_loaded = Command::new("launchctl")
+        .args(["print", &service_target])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !is_loaded {
+        return Ok(());
+    }
+
+    let status = Command::new("launchctl")
+        .args(["bootout", &service_target])
+        .status()
+        .or_else(|_| {
+            Command::new("launchctl")
+                .args(["bootout", gui_domain])
+                .arg(plist_path)
+                .status()
+        })
+        .context("failed to run launchctl bootout")?;
+    if !status.success() {
+        bail!("launchctl bootout {} failed", service_target);
+    }
+    Ok(())
+}
+
 pub fn install(
     exe: &Path,
     agy_bin: &Path,
@@ -99,73 +234,120 @@ pub fn install(
     retention_days: u32,
     clock: Option<ClockFormat>,
 ) -> Result<()> {
-    let dir = systemd_user_dir()?;
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create systemd user dir {}", dir.display()))?;
+    #[cfg(target_os = "macos")]
+    {
+        let dir = launchd_agents_dir()?;
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create LaunchAgents dir {}", dir.display()))?;
+        let plist_content = launchd_plist(
+            exe,
+            agy_bin,
+            data_dir,
+            tight_threshold,
+            history_days,
+            retention_days,
+            clock,
+        )?;
+        let plist_path = dir.join(format!("{LAUNCHD_LABEL}.plist"));
+        let uid = rustix::process::getuid().as_raw();
+        let gui_domain = format!("gui/{uid}");
+        bootout_if_loaded(&gui_domain, &plist_path)?;
 
-    let (service_content, timer_content) = unit_files(
-        exe,
-        agy_bin,
-        data_dir,
-        tight_threshold,
-        history_days,
-        retention_days,
-        clock,
-    )?;
-    let service_path = dir.join("agy-usage.service");
-    let timer_path = dir.join("agy-usage.timer");
+        fs::write(&plist_path, plist_content)
+            .with_context(|| format!("failed to write {}", plist_path.display()))?;
 
-    fs::write(&service_path, service_content)
-        .with_context(|| format!("failed to write {}", service_path.display()))?;
-    fs::write(&timer_path, timer_content)
-        .with_context(|| format!("failed to write {}", timer_path.display()))?;
-
-    let reload = Command::new("systemctl")
-        .args(["--user", "daemon-reload"])
-        .status()
-        .context("failed to run systemctl --user daemon-reload")?;
-    if !reload.success() {
-        bail!("systemctl --user daemon-reload failed");
+        let bootstrap = Command::new("launchctl")
+            .args(["bootstrap", &gui_domain])
+            .arg(&plist_path)
+            .status()
+            .context("failed to run launchctl bootstrap")?;
+        if !bootstrap.success() {
+            bail!(
+                "launchctl bootstrap {} {} failed",
+                gui_domain,
+                plist_path.display()
+            );
+        }
+        Ok(())
     }
 
-    let enable = Command::new("systemctl")
-        .args(["--user", "enable", "--now", "agy-usage.timer"])
-        .status()
-        .context("failed to run systemctl --user enable --now agy-usage.timer")?;
-    if !enable.success() {
-        bail!("systemctl --user enable --now agy-usage.timer failed");
-    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let dir = systemd_user_dir()?;
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create systemd user dir {}", dir.display()))?;
 
-    Ok(())
+        let (service_content, timer_content) = unit_files(
+            exe,
+            agy_bin,
+            data_dir,
+            tight_threshold,
+            history_days,
+            retention_days,
+            clock,
+        )?;
+        let service_path = dir.join("agy-usage.service");
+        let timer_path = dir.join("agy-usage.timer");
+
+        fs::write(&service_path, service_content)
+            .with_context(|| format!("failed to write {}", service_path.display()))?;
+        fs::write(&timer_path, timer_content)
+            .with_context(|| format!("failed to write {}", timer_path.display()))?;
+
+        let reload = Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status()
+            .context("failed to run systemctl --user daemon-reload")?;
+        if !reload.success() {
+            bail!("systemctl --user daemon-reload failed");
+        }
+
+        let enable = Command::new("systemctl")
+            .args(["--user", "enable", "--now", "agy-usage.timer"])
+            .status()
+            .context("failed to run systemctl --user enable --now agy-usage.timer")?;
+        if !enable.success() {
+            bail!("systemctl --user enable --now agy-usage.timer failed");
+        }
+
+        Ok(())
+    }
 }
 
 pub fn uninstall() -> Result<()> {
-    let dir = systemd_user_dir()?;
-    let _ = Command::new("systemctl")
-        .args(["--user", "disable", "--now", "agy-usage.timer"])
-        .status();
-
-    let service_path = dir.join("agy-usage.service");
-    let timer_path = dir.join("agy-usage.timer");
-    let remove_if_exists = |p: &Path| -> Result<()> {
-        match fs::remove_file(p) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e).with_context(|| format!("failed to remove {}", p.display())),
-        }
-    };
-    remove_if_exists(&service_path)?;
-    remove_if_exists(&timer_path)?;
-
-    let reload = Command::new("systemctl")
-        .args(["--user", "daemon-reload"])
-        .status()
-        .context("failed to run systemctl --user daemon-reload")?;
-    if !reload.success() {
-        bail!("systemctl --user daemon-reload failed");
+    #[cfg(target_os = "macos")]
+    {
+        let dir = launchd_agents_dir()?;
+        let plist_path = dir.join(format!("{LAUNCHD_LABEL}.plist"));
+        let uid = rustix::process::getuid().as_raw();
+        let gui_domain = format!("gui/{uid}");
+        bootout_if_loaded(&gui_domain, &plist_path)?;
+        remove_if_exists(&plist_path)?;
+        Ok(())
     }
 
-    Ok(())
+    #[cfg(not(target_os = "macos"))]
+    {
+        let dir = systemd_user_dir()?;
+        let _ = Command::new("systemctl")
+            .args(["--user", "disable", "--now", "agy-usage.timer"])
+            .status();
+
+        let service_path = dir.join("agy-usage.service");
+        let timer_path = dir.join("agy-usage.timer");
+        remove_if_exists(&service_path)?;
+        remove_if_exists(&timer_path)?;
+
+        let reload = Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status()
+            .context("failed to run systemctl --user daemon-reload")?;
+        if !reload.success() {
+            bail!("systemctl --user daemon-reload failed");
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -276,5 +458,69 @@ mod tests {
         )
         .unwrap();
         assert!(!service.contains("--clock"));
+    }
+
+    #[test]
+    fn launchd_plist_contents_and_clock_propagation() {
+        let exe = Path::new("/usr/local/bin/agy-usage");
+        let agy = Path::new("/opt/homebrew/bin/agy");
+        let data = Path::new("/Users/alice/.local/share/agy-usage");
+
+        let plist = launchd_plist(exe, agy, data, 0.10, 30, 90, None).unwrap();
+        assert!(plist.contains("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
+        assert!(plist.contains(&format!("<string>{LAUNCHD_LABEL}</string>")));
+        assert!(plist.contains("<key>ProgramArguments</key>"));
+        assert!(plist.contains("<string>/usr/local/bin/agy-usage</string>"));
+        assert!(plist.contains("<string>--data-dir</string>"));
+        assert!(plist.contains("<string>/Users/alice/.local/share/agy-usage</string>"));
+        assert!(plist.contains("<string>--tight-threshold</string>"));
+        assert!(plist.contains("<string>0.1</string>"));
+        assert!(plist.contains("<string>--history-days</string>"));
+        assert!(plist.contains("<string>30</string>"));
+        assert!(plist.contains("<string>--retention-days</string>"));
+        assert!(plist.contains("<string>90</string>"));
+        assert!(plist.contains("<string>collect</string>"));
+        assert!(!plist.contains("<string>--clock</string>"));
+        assert!(plist.contains("<key>AGY_BIN</key>"));
+        assert!(plist.contains("<string>/opt/homebrew/bin/agy</string>"));
+        assert!(plist.contains("<key>StartInterval</key>"));
+        assert!(plist.contains("<integer>300</integer>"));
+        assert!(plist.contains("<key>RunAtLoad</key>"));
+        assert!(plist.contains("<true/>"));
+
+        let plist_12h =
+            launchd_plist(exe, agy, data, 0.15, 14, 120, Some(ClockFormat::H12)).unwrap();
+        assert!(plist_12h.contains("<string>--clock</string>"));
+        assert!(plist_12h.contains("<string>12h</string>"));
+        assert!(plist_12h.contains("<string>120</string>"));
+    }
+
+    #[test]
+    fn launchd_plist_escapes_xml_and_preserves_percent_and_dollar() {
+        let exe = Path::new("/Users/a&b/bin/agy<1>\"'usage");
+        let agy = Path::new("/opt/$USER/%h/agy&bin");
+        let data = Path::new("/Users/a&b/data<'dir'>");
+
+        let plist = launchd_plist(exe, agy, data, 0.10, 30, 90, None).unwrap();
+        // XML special chars must be escaped
+        assert!(plist.contains("/Users/a&amp;b/bin/agy&lt;1&gt;&quot;&apos;usage"));
+        assert!(plist.contains("/Users/a&amp;b/data&lt;&apos;dir&apos;&gt;"));
+        // Negative boundary: systemd specifiers (% and $) must NOT be doubled in launchd plists
+        assert!(plist.contains("/opt/$USER/%h/agy&amp;bin"));
+        assert!(!plist.contains("$$USER"));
+        assert!(!plist.contains("%%h"));
+    }
+
+    #[test]
+    fn launchd_plist_rejects_control_characters() {
+        let exe = Path::new("/x/agy-usage");
+        let agy = Path::new("/usr/local/bin/agy");
+        let bad_newline = Path::new("/Users/alice/\nattack");
+        let bad_nul = Path::new("/Users/alice/\x07bell");
+
+        assert!(launchd_plist(exe, agy, bad_newline, 0.10, 30, 90, None).is_err());
+        assert!(launchd_plist(exe, agy, bad_nul, 0.10, 30, 90, None).is_err());
+        assert!(launchd_plist(bad_newline, agy, Path::new("/d"), 0.10, 30, 90, None).is_err());
+        assert!(launchd_plist(exe, bad_nul, Path::new("/d"), 0.10, 30, 90, None).is_err());
     }
 }

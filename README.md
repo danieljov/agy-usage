@@ -6,7 +6,7 @@
 
 Quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Google Antigravity.
 
-`agy-usage` samples your Antigravity quota periodically (every 5 minutes via a systemd user timer), computes burn rates and quota window projections, and displays the status in both a `ratatui` terminal interface and a self-contained HTML dashboard.
+`agy-usage` samples your Antigravity quota periodically (every 5 minutes via a `systemd` user timer on Linux or `launchd` user agent on macOS), computes burn rates and quota window projections, and displays the status in both a `ratatui` terminal interface and a self-contained HTML dashboard.
 
 **🔗 [Live Demo](https://danieljov.github.io/agy-usage)** — try the interactive HTML dashboard in your browser (synthetic data).
 
@@ -26,7 +26,7 @@ The [live demo](https://danieljov.github.io/agy-usage) is rendered from syntheti
 
 ## Installation
 
-### Quick Install (Linux x86_64)
+### Quick Install (Linux & macOS, `x86_64` & `aarch64`)
 
 Install the latest release binary into `~/.local/bin` with automated checksum verification:
 
@@ -34,14 +34,15 @@ Install the latest release binary into `~/.local/bin` with automated checksum ve
 curl -fsSL https://raw.githubusercontent.com/danieljov/agy-usage/main/install.sh | bash
 ```
 
-### Manual Binary Download (Linux x86_64)
+### Manual Binary Download (Linux & macOS)
 
-Pre-compiled standalone binaries for Linux (`x86_64-unknown-linux-gnu`) are published on [GitHub Releases](https://github.com/danieljov/agy-usage/releases/latest).
+Pre-compiled standalone binaries for Linux (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`) and macOS (`x86_64-apple-darwin`, `aarch64-apple-darwin`) are published on [GitHub Releases](https://github.com/danieljov/agy-usage/releases/latest).
 
 #### Using `curl`
+Replace `x86_64-unknown-linux-gnu` with `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, or `aarch64-apple-darwin` to match your platform:
 ```bash
 TMP_DIR=$(mktemp -d)
-curl -fsSL https://github.com/danieljov/agy-usage/releases/download/v0.3.1/agy-usage-v0.3.1-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C "$TMP_DIR"
+curl -fsSL https://github.com/danieljov/agy-usage/releases/download/v0.4.0/agy-usage-v0.4.0-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C "$TMP_DIR"
 mkdir -p ~/.local/bin
 mv "$TMP_DIR"/agy-usage-*/agy-usage ~/.local/bin/
 rm -rf "$TMP_DIR"
@@ -50,7 +51,8 @@ rm -rf "$TMP_DIR"
 #### Using GitHub CLI (`gh`)
 ```bash
 TMP_DIR=$(mktemp -d)
-gh release download --repo danieljov/agy-usage --pattern "*.tar.gz" --dir "$TMP_DIR"
+TARGET="x86_64-unknown-linux-gnu" # or aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin
+gh release download --repo danieljov/agy-usage --pattern "agy-usage-*-${TARGET}.tar.gz" --dir "$TMP_DIR"
 tar -xzf "$TMP_DIR"/*.tar.gz -C "$TMP_DIR"
 mkdir -p ~/.local/bin
 mv "$TMP_DIR"/agy-usage-*/agy-usage ~/.local/bin/
@@ -101,7 +103,7 @@ agy-usage completions fish > ~/.config/fish/completions/agy-usage.fish
    ```bash
    agy-usage install-timer
    ```
-   This sets up a systemd user timer running every 5 minutes (`~/.config/systemd/user/agy-usage.{service,timer}`).
+   This sets up a background collector running every 5 minutes (`~/.config/systemd/user/agy-usage.{service,timer}` on Linux, or `~/Library/LaunchAgents/com.agy-usage.collect.plist` on macOS).
 
 2. **Sample quota immediately:**
    ```bash
@@ -140,8 +142,8 @@ Commands:
   collect          Collect quota samples from agy and update dashboard
   show             Show terminal dashboard
   html             Generate HTML dashboard
-  install-timer    Install systemd user timer for automated collection
-  uninstall-timer  Uninstall systemd user timer
+  install-timer    Install background collection timer (systemd on Linux, launchd on macOS)
+  uninstall-timer  Uninstall background collection timer
   completions      Generate shell completion scripts
   help             Print this message or the help of the given subcommand(s)
 
@@ -167,7 +169,7 @@ Displayed times (TUI header, HTML dashboard header, table, chart axes and toolti
 - **Bounded Loading:** `collect`, `html`, and `show --once` keep only samples from the last `--history-days` plus an 8-day margin (one weekly window and a day of slack) in memory, so their memory use and analysis cost do not grow with `--retention-days` (older lines are still read, but only their timestamp is parsed). Buckets without a complete rate lookback inside that range (24h for weekly, 1h for 5h buckets) are left out. Buckets with a window of unknown length are reported if sampled in that range, and then the full history is analyzed so their prognosis stays exact; stale buckets are omitted either way. The interactive `show` TUI always loads the full retained history for its `All` range, so it can still list long-idle buckets that these commands omit.
 - **Atomic Lazy Pruning:** During collection, `agy-usage` checks if the oldest sample exceeds the retention threshold plus a 1-day buffer, performing at most one atomic rewrite per day. File mutations and rewrites coordinate via a sidecar lock (`samples.lock`) to ensure zero lost writes during concurrent appends.
 - **Offline HTML:** Generated HTML dashboards vendor Chart.js and date adapters locally with zero external network requests.
-- **Timer Propagation:** Re-running `agy-usage --retention-days <N> install-timer` automatically propagates configured threshold, history, and retention settings into the systemd user service unit. An explicit `--clock 12h|24h` is propagated too; `auto` is left out so the timer keeps following the system setting.
+- **Timer Propagation:** Re-running `agy-usage --retention-days <N> install-timer` automatically propagates configured threshold, history, and retention settings into the systemd user service unit (or macOS `launchd` user agent). An explicit `--clock 12h|24h` is propagated too; `auto` is left out so the timer keeps following the system setting.
 
 ## Releasing & Crates.io Publishing
 
@@ -178,7 +180,7 @@ Before tagging a release:
    cargo run --example generate_screenshots
    ```
 
-Pushing a version tag (`v*` matching `Cargo.toml`) triggers `.github/workflows/release.yml`, which verifies formatting, lints, tests, and tag-version alignment, uploads the Linux `x86_64` binary tarball to GitHub Releases, and idempotently publishes the crate to crates.io.
+Pushing a version tag (`v*` matching `Cargo.toml`) triggers `.github/workflows/release.yml`, which verifies formatting, lints, tests, and tag-version alignment, uploads the Linux and macOS (`x86_64` and `aarch64`) binary tarballs to GitHub Releases, and idempotently publishes the crate to crates.io.
 
 Authentication with crates.io supports two setups:
 1. **Crates.io Trusted Publishing (Recommended):** Configure `danieljov/agy-usage` (workflow `release.yml`) as a Trusted Publisher in your crate settings on crates.io (uses GitHub OIDC `id-token: write` via `rust-lang/crates-io-auth-action@v1`).

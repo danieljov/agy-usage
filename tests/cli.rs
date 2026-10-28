@@ -526,7 +526,14 @@ fn verify_release_sync(
     }
     for (idx, _) in readme.match_indices("agy-usage-v") {
         let after = &readme[idx + "agy-usage-v".len()..];
-        let found_ver = after.split("-x86_64").next().unwrap_or("");
+        let arch_pos = ["-x86_64-", "-aarch64-"]
+            .into_iter()
+            .filter_map(|arch| after.find(arch))
+            .min();
+        let found_ver = match arch_pos {
+            Some(pos) => &after[..pos],
+            None => after.split_whitespace().next().unwrap_or(""),
+        };
         if found_ver != ver {
             return Err(format!(
                 "README.md contains stale tarball version v{found_ver} (expected v{ver})"
@@ -740,6 +747,25 @@ fn release_metadata_and_docs_stay_in_sync() {
         )
         .is_ok()
     );
+
+    // Hyphenated prerelease versions (e.g. 9.9.9-rc.1) and aarch64 tarball names are parsed accurately
+    let pre_ver = "9.9.9-rc.1";
+    let pre_readme = format!(
+        "{}\nhttps://github.com/danieljov/agy-usage/releases/download/v{pre_ver}/agy-usage-v{pre_ver}-aarch64-apple-darwin.tar.gz",
+        readme.replace(&format!("v{ver}"), &format!("v{pre_ver}"))
+    );
+    let pre_changelog = format!(
+        "{}\n[{pre_ver}]: https://github.com/danieljov/agy-usage/compare/v{ver}...v{pre_ver}\n",
+        changelog.replace(
+            "## [Unreleased]",
+            &format!("## [Unreleased]\n\n## [{pre_ver}] - 2026-10-22")
+        )
+    );
+    let pre_lock = cargo_lock.replace(
+        &format!("name = \"agy-usage\"\nversion = \"{ver}\""),
+        &format!("name = \"agy-usage\"\nversion = \"{pre_ver}\""),
+    );
+    assert!(verify_release_sync(pre_ver, &pre_readme, &pre_changelog, &pre_lock).is_ok());
 
     // Asymmetric desync: CHANGELOG.md bumped to 9.9.9 while Cargo.toml is still at current `ver`
     assert!(
@@ -1050,7 +1076,37 @@ fn release_workflow_configures_idempotent_crates_io_publish() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workflow =
         fs::read_to_string(format!("{manifest_dir}/.github/workflows/release.yml")).unwrap();
+    let ci_workflow =
+        fs::read_to_string(format!("{manifest_dir}/.github/workflows/ci.yml")).unwrap();
+    let install_sh = fs::read_to_string(format!("{manifest_dir}/install.sh")).unwrap();
     let readme = fs::read_to_string(format!("{manifest_dir}/README.md")).unwrap();
+
+    // CI workflow enforces MSRV matching Cargo.toml rust-version
+    let msrv = env!("CARGO_PKG_RUST_VERSION");
+    assert!(
+        ci_workflow.contains(&format!("dtolnay/rust-toolchain@{msrv}")),
+        "ci.yml is missing MSRV job using dtolnay/rust-toolchain@{msrv}"
+    );
+
+    // Release workflow builds all 4 target triples
+    for target in [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+    ] {
+        assert!(
+            workflow.contains(target),
+            "release.yml is missing target triple {target}"
+        );
+    }
+
+    // install.sh supports Linux & Darwin on x86_64 & aarch64/arm64
+    assert!(install_sh.contains("unknown-linux-gnu"));
+    assert!(install_sh.contains("apple-darwin"));
+    assert!(install_sh.contains("aarch64|arm64"));
+    assert!(!install_sh.contains("Pre-compiled binaries are currently only built for Linux"));
+    assert!(!install_sh.contains("Pre-compiled binaries for ${ARCH} are not yet available"));
 
     // OIDC Trusted Publishing permission alongside contents: write
     assert!(workflow.contains("contents: write"));
