@@ -64,7 +64,7 @@ agy-usage --help
 
 ### From Source (Cargo)
 
-Ensure Rust 1.99+ is installed:
+Ensure Rust 1.88+ is installed:
 
 ```bash
 # From crates.io

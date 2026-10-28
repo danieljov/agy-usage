@@ -561,16 +561,77 @@ fn verify_release_sync(
     Ok(())
 }
 
+fn verify_msrv_and_security_policy(
+    msrv: &str,
+    readme: &str,
+    security_md: &str,
+) -> Result<(), String> {
+    if msrv.is_empty() {
+        return Err("Cargo.toml is missing rust-version (MSRV) field".to_string());
+    }
+
+    let expected_msrv_line = format!("Ensure Rust {msrv}+ is installed:");
+    if !readme
+        .lines()
+        .map(str::trim)
+        .any(|line| line == expected_msrv_line)
+    {
+        return Err(format!(
+            "README.md is missing expected MSRV line '{expected_msrv_line}' matching Cargo.toml rust-version = \"{msrv}\""
+        ));
+    }
+
+    for (idx, _) in readme.match_indices("Ensure Rust ") {
+        let after = &readme[idx + "Ensure Rust ".len()..];
+        let line = after.lines().next().unwrap_or("").trim();
+        let found_msrv = line.strip_suffix("+ is installed:").unwrap_or(line);
+        if found_msrv != msrv {
+            return Err(format!(
+                "README.md contains stale Rust version requirement '{found_msrv}' (expected '{msrv}')"
+            ));
+        }
+    }
+
+    let has_supported_versions = security_md
+        .lines()
+        .map(str::trim)
+        .any(|line| line == "## Supported Versions");
+    let has_reporting_section = security_md
+        .lines()
+        .map(str::trim)
+        .any(|line| line == "## Reporting a Vulnerability");
+    if !has_supported_versions || !has_reporting_section {
+        return Err(
+            "SECURITY.md is missing required 'Supported Versions' or 'Reporting a Vulnerability' sections"
+                .to_string(),
+        );
+    }
+
+    let advisory_url = "https://github.com/danieljov/agy-usage/security/advisories/new";
+    if !security_md.contains(advisory_url) {
+        return Err(format!(
+            "SECURITY.md is missing GitHub Private Vulnerability Reporting URL: {advisory_url}"
+        ));
+    }
+
+    Ok(())
+}
+
 #[test]
 fn release_metadata_and_docs_stay_in_sync() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let ver = env!("CARGO_PKG_VERSION");
+    let msrv = env!("CARGO_PKG_RUST_VERSION");
     let readme = fs::read_to_string(format!("{manifest_dir}/README.md")).unwrap();
     let changelog = fs::read_to_string(format!("{manifest_dir}/CHANGELOG.md")).unwrap();
     let cargo_lock = fs::read_to_string(format!("{manifest_dir}/Cargo.lock")).unwrap();
+    let security_md = fs::read_to_string(format!("{manifest_dir}/SECURITY.md")).unwrap();
 
     if let Err(err) = verify_release_sync(ver, &readme, &changelog, &cargo_lock) {
         panic!("Release metadata out of sync with Cargo.toml (v{ver}): {err}");
+    }
+    if let Err(err) = verify_msrv_and_security_policy(msrv, &readme, &security_md) {
+        panic!("MSRV or SECURITY.md out of sync with Cargo.toml (rust-version {msrv}): {err}");
     }
 
     let dash_path = Path::new(manifest_dir).join("assets/screenshots/dashboard.png");
@@ -785,6 +846,42 @@ fn release_metadata_and_docs_stay_in_sync() {
             ],
         )
         .is_ok()
+    );
+
+    // MSRV and SECURITY.md negative boundary assertions
+    assert!(
+        verify_msrv_and_security_policy("", &readme, &security_md)
+            .unwrap_err()
+            .contains("Cargo.toml is missing rust-version")
+    );
+    assert!(
+        verify_msrv_and_security_policy("1.99", &readme, &security_md)
+            .unwrap_err()
+            .contains("README.md is missing expected MSRV line")
+    );
+    let stale_msrv_readme = format!("{readme}\nEnsure Rust 1.99+ is installed:\n");
+    assert!(
+        verify_msrv_and_security_policy(msrv, &stale_msrv_readme, &security_md)
+            .unwrap_err()
+            .contains("README.md contains stale Rust version requirement '1.99'")
+    );
+    let malformed_preceding_msrv_readme = format!("Ensure Rust 1.85 is installed:\n{readme}");
+    assert!(
+        verify_msrv_and_security_policy(msrv, &malformed_preceding_msrv_readme, &security_md)
+            .unwrap_err()
+            .contains("README.md contains stale Rust version requirement '1.85 is installed:'")
+    );
+    assert!(
+        verify_msrv_and_security_policy(msrv, &readme, "# Security Policy\n")
+            .unwrap_err()
+            .contains("SECURITY.md is missing required")
+    );
+    let security_without_url =
+        "## Supported Versions\n\n## Reporting a Vulnerability\nEmail example@example.com\n";
+    assert!(
+        verify_msrv_and_security_policy(msrv, &readme, security_without_url)
+            .unwrap_err()
+            .contains("SECURITY.md is missing GitHub Private Vulnerability Reporting URL")
     );
 }
 

@@ -29,8 +29,21 @@ const TIGHT_THRESHOLD: f64 = 0.10;
 const HISTORY_DAYS: u32 = 30;
 const USAGE: &str = "Usage: generate_demo [OUT_DIR] (default: target/pages)";
 
+/// Anchor in `assets/dashboard.html` replaced with enriched SEO and OpenGraph `<head>` metadata.
+const TITLE_TAG: &str = "<title>agy-usage dashboard</title>";
+
 /// Anchor in `assets/dashboard.html` after which the demo banner is inserted.
 const BODY_TAG: &str = "<body>";
+
+/// SEO and OpenGraph `<head>` tags injected into the hosted GitHub Pages demo.
+const DEMO_HEAD_META: &str = r#"<title>agy-usage — Google Antigravity Quota &amp; Burn-Rate Dashboard</title>
+    <meta name="description" content="Interactive HTML quota history and burn-rate prognosis dashboard for Google Antigravity (agy-usage live demo).">
+    <link rel="canonical" href="https://danieljov.github.io/agy-usage/">
+    <meta property="og:title" content="agy-usage — Google Antigravity Quota Dashboard">
+    <meta property="og:description" content="Quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Google Antigravity.">
+    <meta property="og:url" content="https://danieljov.github.io/agy-usage/">
+    <meta property="og:image" content="https://raw.githubusercontent.com/danieljov/agy-usage/main/assets/screenshots/dashboard.png">
+    <meta name="twitter:card" content="summary_large_image">"#;
 
 /// Notice shown at the top of the hosted demo so visitors arriving from the
 /// repository homepage know the data is synthetic and frozen at build time.
@@ -46,10 +59,18 @@ fn render_demo(now: DateTime<Utc>) -> anyhow::Result<String> {
     let reports = forecast::analyze(&samples, TIGHT_THRESHOLD);
     let dashboard = html::render(&reports, now, HISTORY_DAYS, ClockFormat::H24);
     anyhow::ensure!(
+        dashboard.matches(TITLE_TAG).count() == 1,
+        "Expected exactly one {TITLE_TAG} tag in dashboard template"
+    );
+    anyhow::ensure!(
         dashboard.matches(BODY_TAG).count() == 1,
         "Expected exactly one {BODY_TAG} tag in dashboard template"
     );
-    Ok(dashboard.replacen(BODY_TAG, &format!("{BODY_TAG}{DEMO_BANNER}"), 1))
+    Ok(dashboard.replacen(TITLE_TAG, DEMO_HEAD_META, 1).replacen(
+        BODY_TAG,
+        &format!("{BODY_TAG}{DEMO_BANNER}"),
+        1,
+    ))
 }
 
 /// Writes the demo dashboard to `<out_dir>/index.html`, creating `out_dir`
@@ -89,8 +110,34 @@ mod tests {
 
     #[test]
     fn demo_html_is_self_contained_and_populated() {
-        let html = render_demo(Utc::now()).expect("failed to render demo");
+        let now = Utc::now();
+        let html = render_demo(now).expect("failed to render demo");
         assert!(html.starts_with("<!DOCTYPE html>"));
+        // SEO and OpenGraph metadata must be injected inside <head>.
+        let (head, _rest) = html.split_once("</head>").expect("missing </head>");
+        for expected_tag in [
+            "<title>agy-usage — Google Antigravity Quota &amp; Burn-Rate Dashboard</title>",
+            r#"<meta name="description" content="Interactive HTML quota history and burn-rate prognosis dashboard for Google Antigravity (agy-usage live demo).">"#,
+            r#"<link rel="canonical" href="https://danieljov.github.io/agy-usage/">"#,
+            r#"<meta property="og:title" content="agy-usage — Google Antigravity Quota Dashboard">"#,
+            r#"<meta property="og:description" content="Quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Google Antigravity.">"#,
+            r#"<meta property="og:url" content="https://danieljov.github.io/agy-usage/">"#,
+            r#"<meta property="og:image" content="https://raw.githubusercontent.com/danieljov/agy-usage/main/assets/screenshots/dashboard.png">"#,
+            r#"<meta name="twitter:card" content="summary_large_image">"#,
+        ] {
+            assert!(
+                head.contains(expected_tag),
+                "missing expected head tag: {expected_tag}"
+            );
+        }
+        // Negative boundary: generic title is replaced and local html::render stays offline/untouched.
+        assert!(!html.contains(TITLE_TAG));
+        assert_eq!(html.matches("<title>").count(), 1);
+        let local_html = html::render(&[], now, HISTORY_DAYS, ClockFormat::H24);
+        assert!(local_html.contains(TITLE_TAG));
+        assert!(!local_html.contains("og:image"));
+        assert!(!local_html.contains("raw.githubusercontent.com"));
+        assert!(!local_html.contains("Live demo"));
         // Banner must be present.
         assert!(html.contains("Live demo"));
         assert!(html.contains("synthetic quota data"));
