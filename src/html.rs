@@ -643,4 +643,33 @@ mod tests {
             serde_json::from_value(data["reports"][0]["boundaries"].clone()).unwrap();
         assert_eq!(got, vec![now - Duration::days(1), cutoff]);
     }
+
+    #[test]
+    fn crosshair_sync_plugin_and_cleanup_on_range_toggle() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
+        let output = render(&[], now, 30, ClockFormat::H24);
+
+        // Plugin registration and binary search helper
+        assert!(output.contains("const crosshairSyncPlugin = {"));
+        assert!(output.contains("id: 'crosshairSync'"));
+        assert!(output.contains("Chart.register(boundaryPlugin, crosshairSyncPlugin)"));
+        assert!(output.contains("function findNearestActualIndex(pts, targetMs)"));
+        assert!(output.contains("let isSyncingCrosshair = false;"));
+        assert!(output.contains("const chartInstances = [];"));
+        assert!(output.contains("chartInstances.push(chart);"));
+
+        // Source chart preserves native tooltip and only marks args.changed = true
+        assert!(output.contains("chart.$crosshairTimeMs = targetMs;"));
+        assert!(output.contains("args.changed = true;"));
+
+        // Sibling chart checks resolved scale bounds, decimated meta element coordinates, and snap tolerance
+        assert!(output.contains("targetMs < xScale.min || targetMs > xScale.max"));
+        assert!(output.contains("Math.min(15 * 60 * 1000, (xScale.max - xScale.min) * 0.05)"));
+        assert!(output.contains("sibling.getDatasetMeta(actualIdx)"));
+        assert!(output.contains("sibling.setActiveElements(activeElements)"));
+        assert!(output.contains("sibling.tooltip?.setActiveElements(activeElements"));
+
+        // Range toggle clears any active synced crosshair
+        assert!(output.contains("clearSyncedCrosshair(null);"));
+    }
 }

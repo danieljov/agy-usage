@@ -11,7 +11,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::Marker;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Axis, Block, Borders, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table,
+    Axis, Block, Borders, Cell, Chart, Clear, Dataset, GraphType, Paragraph, Row, Table,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -67,6 +67,7 @@ pub struct ViewState {
     pub is_once: bool,
     pub clock: ClockFormat,
     pub time_range: TimeRange,
+    pub show_help: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -293,6 +294,9 @@ pub fn draw(frame: &mut Frame, reports: &[BucketReport], state: &ViewState, now:
         )
         .block(Block::default().borders(Borders::ALL).title("agy-usage"));
         frame.render_widget(empty_msg, area);
+        if state.show_help {
+            draw_help_modal(frame, area);
+        }
         return;
     }
 
@@ -323,6 +327,9 @@ pub fn draw(frame: &mut Frame, reports: &[BucketReport], state: &ViewState, now:
             state.clock,
         );
         draw_status_bar(frame, reports, state, chunks[2], now);
+        if state.show_help {
+            draw_help_modal(frame, area);
+        }
         return;
     }
 
@@ -371,6 +378,9 @@ pub fn draw(frame: &mut Frame, reports: &[BucketReport], state: &ViewState, now:
 
     draw_table(frame, reports, chunks[1], now, None, state.clock);
     draw_status_bar(frame, reports, state, chunks[2], now);
+    if state.show_help {
+        draw_help_modal(frame, area);
+    }
 }
 
 fn projection_points(rep: &BucketReport, reset_time: DateTime<Utc>) -> Vec<(f64, f64)> {
@@ -708,20 +718,6 @@ fn draw_status_bar(
         format!("t: Range ({})", state.time_range.label())
     };
 
-    let left_text = if state.is_once {
-        format!(
-            "agy-usage · {}",
-            state.clock.format_datetime(&now.with_timezone(&Local))
-        )
-    } else if let Some(msg) = &state.message {
-        format!(
-            "msg: {} | Esc: Grid  1-9: Focus  {}  r: Refresh  q: Quit",
-            msg, range_hint
-        )
-    } else {
-        format!("Esc: Grid  1-9: Focus  {}  r: Refresh  q: Quit", range_hint)
-    };
-
     let latest_sample = reports.iter().map(|r| r.prognosis.last_sample).max();
     let (right_text, is_stale) = if let Some(ls) = latest_sample {
         let age_secs = (now - ls).num_seconds();
@@ -733,6 +729,100 @@ fn draw_status_bar(
         ("".to_string(), false)
     };
 
+    let right_len = right_text.width();
+    let total_width = area.width as usize;
+    let avail_left = if right_len > 0 {
+        total_width.saturating_sub(right_len + 2)
+    } else {
+        total_width
+    };
+
+    let left_text = if state.is_once {
+        format!(
+            "agy-usage · {}",
+            state.clock.format_datetime(&now.with_timezone(&Local))
+        )
+    } else if let Some(msg) = &state.message {
+        let wide = format!(
+            "msg: {} | Esc: Grid  1-9: Focus  {}  r: Refresh  ?: Help  q: Quit",
+            msg, range_hint
+        );
+        let compact = format!(
+            "msg: {} | Esc: Grid 1-9: Focus {} r: Refresh ?: Help q: Quit",
+            msg, range_hint
+        );
+        let tight = format!(
+            "msg: {} | Esc:Grid 1-9:Focus {} r:Refresh ?: Help q:Quit",
+            msg, range_hint
+        );
+        if wide.width() <= avail_left {
+            wide
+        } else if compact.width() <= avail_left {
+            compact
+        } else if tight.width() <= avail_left {
+            tight
+        } else {
+            let short_range = if state.time_range == TimeRange::Window {
+                "t".to_string()
+            } else {
+                format!("t({})", state.time_range.label())
+            };
+            let short_suffix = format!(" | Esc 1-9 {} r ?: Help q:Quit", short_range);
+            let min_suffix = " | ?: Help q:Quit";
+            let prefix = "msg: ";
+            if avail_left >= prefix.width() + short_suffix.width() + 4 {
+                let max_msg = avail_left - prefix.width() - short_suffix.width();
+                format!(
+                    "{}{}{}",
+                    prefix,
+                    truncate_to_width(msg, max_msg),
+                    short_suffix
+                )
+            } else if avail_left >= prefix.width() + min_suffix.width() + 4 {
+                let max_msg = avail_left - prefix.width() - min_suffix.width();
+                format!(
+                    "{}{}{}",
+                    prefix,
+                    truncate_to_width(msg, max_msg),
+                    min_suffix
+                )
+            } else {
+                let max_msg = total_width
+                    .saturating_sub(prefix.width() + min_suffix.width())
+                    .max(1);
+                format!(
+                    "{}{}{}",
+                    prefix,
+                    truncate_to_width(msg, max_msg),
+                    min_suffix
+                )
+            }
+        }
+    } else {
+        let wide = format!(
+            "Esc: Grid  1-9: Focus  {}  r: Refresh  ?: Help  q: Quit",
+            range_hint
+        );
+        if wide.width() <= avail_left {
+            wide
+        } else {
+            let compact = format!(
+                "Esc: Grid 1-9: Focus {} r: Refresh ?: Help q: Quit",
+                range_hint
+            );
+            if compact.width() <= avail_left {
+                compact
+            } else {
+                let tight = format!("Esc:Grid 1-9:Focus {} r:Refresh ?: Help q:Quit", range_hint);
+                if tight.width() <= avail_left || compact.width() > total_width {
+                    tight
+                } else {
+                    compact
+                }
+            }
+        }
+    };
+
     let right_color = if is_stale {
         Color::Red
     } else {
@@ -740,8 +830,6 @@ fn draw_status_bar(
     };
 
     let left_len = left_text.width();
-    let right_len = right_text.width();
-    let total_width = area.width as usize;
 
     let line = if left_len + right_len + 2 <= total_width {
         let pad = total_width.saturating_sub(left_len + right_len);
@@ -758,6 +846,118 @@ fn draw_status_bar(
     };
 
     frame.render_widget(Paragraph::new(line), area);
+}
+
+fn draw_help_modal(frame: &mut Frame, area: Rect) {
+    let modal_w = 70.min(area.width);
+    let modal_h = 18.min(area.height);
+    let x = area.x + area.width.saturating_sub(modal_w) / 2;
+    let y = area.y + area.height.saturating_sub(modal_h) / 2;
+    let modal_area = Rect::new(x, y, modal_w, modal_h);
+
+    let key_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let heading_style = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+
+    let lines = vec![
+        Line::from(Span::styled("Keyboard Controls", heading_style)),
+        Line::from(vec![
+            Span::styled("  1-9        ", key_style),
+            Span::raw("Focus bucket chart & row"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc        ", key_style),
+            Span::raw("Close help or return to grid view"),
+        ]),
+        Line::from(vec![
+            Span::styled("  t / w      ", key_style),
+            Span::raw("Cycle chart time range (Window/24h/7d/30d/All)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  r          ", key_style),
+            Span::raw("Refresh usage samples in background"),
+        ]),
+        Line::from(vec![
+            Span::styled("  ?          ", key_style),
+            Span::raw("Toggle this help overlay"),
+        ]),
+        Line::from(vec![
+            Span::styled("  q / Ctrl-C ", key_style),
+            Span::raw("Quit"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("Chart Series & Status Legend", heading_style)),
+        Line::from(vec![
+            Span::styled("  ── Actual  ", Style::default().fg(Color::Cyan)),
+            Span::raw("Recorded remaining quota  "),
+            Span::styled("·· Budget  ", Style::default().fg(Color::DarkGray)),
+            Span::raw("Even linear pace"),
+        ]),
+        Line::from(vec![
+            Span::styled("  ·· Proj    ", Style::default().fg(Color::Green)),
+            Span::raw("Forecast (green/ylw/red)  "),
+            Span::styled("│  Reset   ", Style::default().fg(Color::White)),
+            Span::raw("Window boundary"),
+        ]),
+        Line::from(vec![
+            Span::styled("  ✅ on track", Style::default().fg(Color::Green)),
+            Span::raw("  Above tight threshold at reset"),
+        ]),
+        Line::from(vec![
+            Span::styled("  ⚠  tight   ", Style::default().fg(Color::Yellow)),
+            Span::raw("  Between 0% and --tight threshold at reset"),
+        ]),
+        Line::from(vec![
+            Span::styled("  ❌ in <t>  ", Style::default().fg(Color::Red)),
+            Span::raw("  Projected to hit 0% before reset"),
+        ]),
+        Line::from(vec![
+            Span::styled("  ⏳ collecting", Style::default().fg(Color::Gray)),
+            Span::raw(" Need ≥2 samples inside the active window"),
+        ]),
+        Line::from(vec![
+            Span::styled("  🚫 disabled", Style::default().fg(Color::DarkGray)),
+            Span::raw("   Bucket inactive or weekly limit reached"),
+        ]),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(
+            " Help · Controls & Legend ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    frame.render_widget(Clear, modal_area);
+    frame.render_widget(Paragraph::new(lines).block(block), modal_area);
+}
+
+fn truncate_to_width(s: &str, max_width: usize) -> String {
+    if s.width() <= max_width {
+        return s.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    let budget = max_width.saturating_sub(1);
+    for ch in s.chars() {
+        let w = UnicodeWidthStr::width(ch.encode_utf8(&mut [0; 4]));
+        if used + w > budget {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push('…');
+    out
 }
 
 fn visible_cells(
@@ -1058,6 +1258,57 @@ fn needs_redraw(dirty: bool, last_draw: Option<Instant>, now: Instant) -> bool {
     dirty || last_draw.is_none_or(|t| now.duration_since(t) >= IDLE_REDRAW_INTERVAL)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyAction {
+    None,
+    Quit,
+    Refresh,
+}
+
+pub fn handle_key_event(
+    state: &mut ViewState,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    report_count: usize,
+) -> KeyAction {
+    if (modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c'))
+        || code == KeyCode::Char('q')
+    {
+        return KeyAction::Quit;
+    }
+
+    if state.show_help {
+        if matches!(code, KeyCode::Esc | KeyCode::Char('?')) {
+            state.show_help = false;
+        }
+        return KeyAction::None;
+    }
+
+    match code {
+        KeyCode::Char('?') => {
+            state.show_help = true;
+            KeyAction::None
+        }
+        KeyCode::Esc => {
+            state.focus = None;
+            KeyAction::None
+        }
+        KeyCode::Char('t') | KeyCode::Char('w') => {
+            state.time_range = state.time_range.next();
+            KeyAction::None
+        }
+        KeyCode::Char('r') => KeyAction::Refresh,
+        KeyCode::Char(c) if ('1'..='9').contains(&c) => {
+            let idx = (c as usize) - ('1' as usize);
+            if idx < report_count {
+                state.focus = Some(idx);
+            }
+            KeyAction::None
+        }
+        _ => KeyAction::None,
+    }
+}
+
 pub fn run(data_dir: &Path, tight: f64, agy_bin: &str, clock: ClockFormat) -> Result<()> {
     let mut terminal = ratatui::try_init()?;
     let result = (|| -> Result<()> {
@@ -1159,20 +1410,12 @@ pub fn run(data_dir: &Path, tight: f64, agy_bin: &str, clock: ClockFormat) -> Re
             };
             // Any terminal event (key, resize, focus, paste) may change what is shown.
             dirty |= event.is_some();
-            if let Some(Event::Key(key)) = event {
-                if (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c'))
-                    || key.code == KeyCode::Char('q')
-                {
-                    break;
-                }
-                match key.code {
-                    KeyCode::Esc => {
-                        state.focus = None;
-                    }
-                    KeyCode::Char('t') | KeyCode::Char('w') => {
-                        state.time_range = state.time_range.next();
-                    }
-                    KeyCode::Char('r') => {
+            if let Some(Event::Key(key)) = event
+                && key.kind == event::KeyEventKind::Press
+            {
+                match handle_key_event(&mut state, key.code, key.modifiers, reports.len()) {
+                    KeyAction::Quit => break,
+                    KeyAction::Refresh => {
                         if is_refreshing {
                             state.message = Some("Refresh already in progress...".to_string());
                         } else {
@@ -1238,13 +1481,7 @@ pub fn run(data_dir: &Path, tight: f64, agy_bin: &str, clock: ClockFormat) -> Re
                             }));
                         }
                     }
-                    KeyCode::Char(c) if ('1'..='9').contains(&c) => {
-                        let idx = (c as usize) - ('1' as usize);
-                        if idx < reports.len() {
-                            state.focus = Some(idx);
-                        }
-                    }
-                    _ => {}
+                    KeyAction::None => {}
                 }
             }
         }
@@ -1527,7 +1764,7 @@ mod tests {
             local.format("%Y-%m-%d %H:%M:%S")
         )));
         assert!(!text.contains("UTC"));
-        assert!(!text.contains("Esc: Grid  1-9: Focus  t: Range  r: Refresh  q: Quit"));
+        assert!(!text.contains("Esc: Grid  1-9: Focus  t: Range  r: Refresh  ?: Help  q: Quit"));
     }
 
     #[test]
@@ -1566,7 +1803,165 @@ mod tests {
             text.push('\n');
         }
 
-        assert!(text.contains("Esc: Grid  1-9: Focus  t: Range  r: Refresh  q: Quit"));
+        assert!(text.contains("Esc: Grid  1-9: Focus  t: Range  r: Refresh  ?: Help  q: Quit"));
+        assert!(text.contains("last sample 5m ago"));
+
+        // Verify 80-column interactive footer keeps both ?: Help and last sample visible
+        // across default Window range, non-default 30d range, and transient status messages
+        for range in [TimeRange::Window, TimeRange::D30] {
+            for msg in [
+                None,
+                Some("Refreshed successfully".to_string()),
+                Some(
+                    "Skipped 3 corrupt lines in /home/user/.local/share/agy-usage/samples.jsonl"
+                        .to_string(),
+                ),
+            ] {
+                let state_80 = ViewState {
+                    time_range: range,
+                    message: msg.clone(),
+                    ..state.clone()
+                };
+                let mut term_80 = Terminal::new(TestBackend::new(80, 24)).unwrap();
+                term_80.draw(|f| draw(f, &reports, &state_80, now)).unwrap();
+                let buf_80 = term_80.backend().buffer();
+                let mut text_80 = String::new();
+                for x in 0..80 {
+                    text_80.push_str(buf_80[(x, 23)].symbol());
+                }
+                assert!(
+                    text_80.contains("?: Help") && text_80.contains("last sample 5m ago"),
+                    "expected 80-col footer ({range:?}, msg={msg:?}) to keep both ?: Help and last sample, got: '{text_80}'"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn help_overlay_toggles_and_esc_precedence_preserves_focus() {
+        let mut state = ViewState::default();
+
+        // Focus bucket 2 (index 1)
+        assert_eq!(
+            handle_key_event(&mut state, KeyCode::Char('2'), KeyModifiers::NONE, 4),
+            KeyAction::None
+        );
+        assert_eq!(state.focus, Some(1));
+        assert!(!state.show_help);
+
+        // Toggle help overlay open with '?'
+        assert_eq!(
+            handle_key_event(&mut state, KeyCode::Char('?'), KeyModifiers::NONE, 4),
+            KeyAction::None
+        );
+        assert!(state.show_help);
+        assert_eq!(state.focus, Some(1));
+
+        // Negative boundary: while help modal is open, background keys (1-9, t/w, r) are ignored
+        assert_eq!(
+            handle_key_event(&mut state, KeyCode::Char('1'), KeyModifiers::NONE, 4),
+            KeyAction::None
+        );
+        assert_eq!(
+            state.focus,
+            Some(1),
+            "focus must not change while help is open"
+        );
+        assert_eq!(
+            handle_key_event(&mut state, KeyCode::Char('t'), KeyModifiers::NONE, 4),
+            KeyAction::None
+        );
+        assert_eq!(
+            state.time_range,
+            TimeRange::Window,
+            "time_range must not change while help is open"
+        );
+        assert_eq!(
+            handle_key_event(&mut state, KeyCode::Char('r'), KeyModifiers::NONE, 4),
+            KeyAction::None,
+            "refresh must not trigger while help is open"
+        );
+
+        // First Esc closes the help overlay while preserving focus on bucket 2
+        assert_eq!(
+            handle_key_event(&mut state, KeyCode::Esc, KeyModifiers::NONE, 4),
+            KeyAction::None
+        );
+        assert!(!state.show_help);
+        assert_eq!(state.focus, Some(1));
+
+        // Second Esc returns from focus view to grid view
+        assert_eq!(
+            handle_key_event(&mut state, KeyCode::Esc, KeyModifiers::NONE, 4),
+            KeyAction::None
+        );
+        assert_eq!(state.focus, None);
+
+        // Pressing '?' again opens and pressing '?' a second time closes
+        handle_key_event(&mut state, KeyCode::Char('?'), KeyModifiers::NONE, 4);
+        assert!(state.show_help);
+        handle_key_event(&mut state, KeyCode::Char('?'), KeyModifiers::NONE, 4);
+        assert!(!state.show_help);
+
+        // Quit keys ('q' and Ctrl-C) still exit immediately even when help is open
+        handle_key_event(&mut state, KeyCode::Char('?'), KeyModifiers::NONE, 4);
+        assert_eq!(
+            handle_key_event(&mut state, KeyCode::Char('q'), KeyModifiers::NONE, 4),
+            KeyAction::Quit
+        );
+        assert_eq!(
+            handle_key_event(&mut state, KeyCode::Char('c'), KeyModifiers::CONTROL, 4),
+            KeyAction::Quit
+        );
+    }
+
+    #[test]
+    fn help_overlay_renders_controls_and_legend_across_views_and_tiny_terminals() {
+        let reports = make_test_reports();
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
+        let state = ViewState {
+            show_help: true,
+            ..Default::default()
+        };
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &reports, &state, now)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..40 {
+            for x in 0..120 {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(text.contains("Help · Controls & Legend"));
+        assert!(text.contains("Cycle chart time range (Window/24h/7d/30d/All)"));
+        assert!(text.contains("Toggle this help overlay"));
+        assert!(text.contains("Even linear pace"));
+        assert!(text.contains("Window boundary"));
+        assert!(text.contains("on track"));
+        assert!(text.contains("tight"));
+        assert!(text.contains("Need ≥2 samples inside the active window"));
+        assert!(text.contains("Bucket inactive or weekly limit reached"));
+
+        // Also renders over empty state and focused state, and never panics on tiny terminals
+        let mut empty_term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        empty_term.draw(|f| draw(f, &[], &state, now)).unwrap();
+        let empty_buf = empty_term.backend().buffer();
+        let mut empty_text = String::new();
+        for y in 0..24 {
+            for x in 0..80 {
+                empty_text.push_str(empty_buf[(x, y)].symbol());
+            }
+            empty_text.push('\n');
+        }
+        assert!(empty_text.contains("Help · Controls & Legend"));
+        assert!(empty_text.contains("Bucket inactive or weekly limit reached"));
+
+        for (w, h) in [(20, 5), (10, 3), (4, 2)] {
+            let mut tiny = Terminal::new(TestBackend::new(w, h)).unwrap();
+            assert!(tiny.draw(|f| draw(f, &reports, &state, now)).is_ok());
+        }
     }
 
     #[test]

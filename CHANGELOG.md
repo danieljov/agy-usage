@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Interactive TUI `?` Help Overlay & HTML Hover Crosshair Sync (`src/tui.rs`, `assets/dashboard.html`, `src/html.rs`, `README.md`)**:
+  - Added a toggleable `?` help modal (`Help · Controls & Legend`) in `agy-usage show` displaying keyboard shortcuts, chart series descriptions (`Actual`, `Budget`, `Proj`, `Reset`), and prognosis status definitions (`on track`, `tight`, `in <t>`, `collecting`, `disabled`), with `?: Help` in the status bar (including a compact 80-column fallback that preserves `last sample ...`).
+  - Added synchronized hover crosshairs and tooltips across all HTML dashboard charts (`crosshairSyncPlugin` in `assets/dashboard.html`), snapping sibling charts to the nearest visible `Actual` sample within a bounded time tolerance and clearing stale crosshairs on mouseout or time-range toggle.
 - **Shell Completions (`src/main.rs`, `Cargo.toml`, `README.md`)**:
   - Added `agy-usage completions <bash|zsh|fish|elvish|powershell>` subcommand powered by `clap_complete` with directory/file `ValueHint` annotations for `--data-dir` and `html --out`.
   - Handled `BrokenPipe` cleanly when piping completions output and skipped data-directory resolution for `completions` and `uninstall-timer` so completion generation works when `$HOME` and `$XDG_DATA_HOME` are unset.
