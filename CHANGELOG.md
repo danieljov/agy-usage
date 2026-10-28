@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Shell Completions (`src/main.rs`, `Cargo.toml`, `README.md`)**:
+  - Added `agy-usage completions <bash|zsh|fish|elvish|powershell>` subcommand powered by `clap_complete` with directory/file `ValueHint` annotations for `--data-dir` and `html --out`.
+  - Handled `BrokenPipe` cleanly when piping completions output and skipped data-directory resolution for `completions` and `uninstall-timer` so completion generation works when `$HOME` and `$XDG_DATA_HOME` are unset.
 - **Discovery, SEO & Security Metadata (`Cargo.toml`, `SECURITY.md`, `examples/generate_demo.rs`, `.github/workflows/pages.yml`)**:
   - Added `rust-version = "1.88"` (MSRV) to `Cargo.toml` and synchronized `README.md` (`Ensure Rust 1.88+ is installed:`).
   - Added `SECURITY.md` documenting supported versions and GitHub Private Vulnerability Reporting (`https://github.com/danieljov/agy-usage/security/advisories/new`).
