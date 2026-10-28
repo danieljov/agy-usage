@@ -849,8 +849,8 @@ fn draw_status_bar(
 }
 
 fn draw_help_modal(frame: &mut Frame, area: Rect) {
-    let modal_w = 68.min(area.width);
-    let modal_h = 17.min(area.height);
+    let modal_w = 70.min(area.width);
+    let modal_h = 18.min(area.height);
     let x = area.x + area.width.saturating_sub(modal_w) / 2;
     let y = area.y + area.height.saturating_sub(modal_h) / 2;
     let modal_area = Rect::new(x, y, modal_w, modal_h);
@@ -916,9 +916,11 @@ fn draw_help_modal(frame: &mut Frame, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("  ⏳ collecting", Style::default().fg(Color::Gray)),
-            Span::raw(" Need ≥2 samples · "),
-            Span::styled("🚫 disabled", Style::default().fg(Color::DarkGray)),
-            Span::raw(" Inactive / limit reached"),
+            Span::raw(" Need ≥2 samples inside the active window"),
+        ]),
+        Line::from(vec![
+            Span::styled("  🚫 disabled", Style::default().fg(Color::DarkGray)),
+            Span::raw("   Bucket inactive or weekly limit reached"),
         ]),
     ];
 
@@ -1933,12 +1935,14 @@ mod tests {
             text.push('\n');
         }
         assert!(text.contains("Help · Controls & Legend"));
-        assert!(text.contains("Cycle chart time range"));
+        assert!(text.contains("Cycle chart time range (Window/24h/7d/30d/All)"));
         assert!(text.contains("Toggle this help overlay"));
+        assert!(text.contains("Even linear pace"));
+        assert!(text.contains("Window boundary"));
         assert!(text.contains("on track"));
         assert!(text.contains("tight"));
-        assert!(text.contains("collecting"));
-        assert!(text.contains("disabled"));
+        assert!(text.contains("Need ≥2 samples inside the active window"));
+        assert!(text.contains("Bucket inactive or weekly limit reached"));
 
         // Also renders over empty state and focused state, and never panics on tiny terminals
         let mut empty_term = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -1952,6 +1956,7 @@ mod tests {
             empty_text.push('\n');
         }
         assert!(empty_text.contains("Help · Controls & Legend"));
+        assert!(empty_text.contains("Bucket inactive or weekly limit reached"));
 
         for (w, h) in [(20, 5), (10, 3), (4, 2)] {
             let mut tiny = Terminal::new(TestBackend::new(w, h)).unwrap();
