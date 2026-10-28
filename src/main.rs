@@ -88,6 +88,7 @@ enum Commands {
     /// Generate shell completion scripts
     Completions {
         /// Target shell
+        #[arg(value_enum)]
         shell: Shell,
     },
 }
