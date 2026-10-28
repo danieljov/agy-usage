@@ -912,6 +912,140 @@ fn cli_version_flags() {
 }
 
 #[test]
+fn cli_completions_subcommand() {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let bin_path = env!("CARGO_BIN_EXE_agy-usage");
+
+    for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+        let out = Command::new(bin_path)
+            .args(["completions", shell])
+            .env_remove("HOME")
+            .env_remove("XDG_DATA_HOME")
+            .output()
+            .expect("failed to execute agy-usage completions");
+        assert!(
+            out.status.success(),
+            "expected completions {shell} to succeed, stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.stderr.is_empty(),
+            "expected empty stderr for completions {shell}, got: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(!stdout.trim().is_empty(), "empty output for {shell}");
+        for expected_token in [
+            "agy-usage",
+            "collect",
+            "show",
+            "html",
+            "install-timer",
+            "uninstall-timer",
+            "completions",
+            "data-dir",
+            "clock",
+        ] {
+            assert!(
+                stdout.contains(expected_token),
+                "completions {shell} output missing '{expected_token}'"
+            );
+        }
+        if shell == "zsh" {
+            // Verify DirPath hint on --data-dir produces zsh directory completion (`_files -/`)
+            assert!(
+                stdout.contains("_files -/"),
+                "expected zsh completion to include directory hint `_files -/` for --data-dir"
+            );
+        }
+    }
+
+    // Negative boundary 1: unknown shell is rejected with non-zero exit status
+    let bad_shell = Command::new(bin_path)
+        .args(["completions", "tcsh"])
+        .env_remove("HOME")
+        .env_remove("XDG_DATA_HOME")
+        .output()
+        .expect("failed to execute agy-usage completions tcsh");
+    assert!(!bad_shell.status.success());
+    let bad_stderr = String::from_utf8_lossy(&bad_shell.stderr);
+    assert!(
+        bad_stderr.contains("invalid value 'tcsh'"),
+        "unexpected stderr for invalid shell: {bad_stderr}"
+    );
+    assert!(bad_shell.stdout.is_empty());
+
+    // Negative boundary 2: missing shell argument is rejected
+    let missing_arg = Command::new(bin_path)
+        .arg("completions")
+        .env_remove("HOME")
+        .env_remove("XDG_DATA_HOME")
+        .output()
+        .expect("failed to execute agy-usage completions without shell");
+    assert!(!missing_arg.status.success());
+    assert!(missing_arg.stdout.is_empty());
+
+    // Negative boundary 3: invalid global --retention-days < --history-days is still rejected
+    let bad_global = Command::new(bin_path)
+        .args([
+            "--history-days",
+            "60",
+            "--retention-days",
+            "30",
+            "completions",
+            "bash",
+        ])
+        .env_remove("HOME")
+        .env_remove("XDG_DATA_HOME")
+        .output()
+        .expect("failed to execute agy-usage with invalid retention-days");
+    assert!(!bad_global.status.success());
+    assert!(bad_global.stdout.is_empty());
+
+    // BrokenPipe resilience: closing stdout pipe after 1 byte must exit 0 without panic
+    let mut child = Command::new(bin_path)
+        .args(["completions", "zsh"])
+        .env_remove("HOME")
+        .env_remove("XDG_DATA_HOME")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn agy-usage completions zsh");
+    {
+        let mut stdout = child.stdout.take().unwrap();
+        let mut one_byte = [0u8; 1];
+        stdout.read_exact(&mut one_byte).unwrap();
+        // `stdout` drops here, closing the read end of the pipe
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "expected clean exit on broken pipe, got status {:?}, stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "expected empty stderr on broken pipe, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify README.md documents the completions subcommand and Shell Completions setup
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let readme = fs::read_to_string(format!("{manifest_dir}/README.md")).unwrap();
+    assert!(
+        readme.contains("completions      Generate shell completion scripts"),
+        "README.md CLI Reference is missing 'completions' entry"
+    );
+    assert!(
+        readme.contains("### Shell Completions"),
+        "README.md is missing '### Shell Completions' section"
+    );
+}
+
+#[test]
 fn release_workflow_configures_idempotent_crates_io_publish() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workflow =

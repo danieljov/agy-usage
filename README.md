@@ -77,6 +77,24 @@ cargo install --git https://github.com/danieljov/agy-usage.git
 cargo install --path .
 ```
 
+### Shell Completions
+
+Generate tab-completion scripts for `bash`, `zsh`, `fish`, `elvish`, or `powershell`:
+
+```bash
+# Bash
+mkdir -p ~/.local/share/bash-completion/completions
+agy-usage completions bash > ~/.local/share/bash-completion/completions/agy-usage
+
+# Zsh (ensure ~/.zfunc is in your fpath before compinit)
+mkdir -p ~/.zfunc
+agy-usage completions zsh > ~/.zfunc/_agy-usage
+
+# Fish
+mkdir -p ~/.config/fish/completions
+agy-usage completions fish > ~/.config/fish/completions/agy-usage.fish
+```
+
 ## Quick Start
 
 1. **Install automated sampling timer:**
@@ -123,6 +141,7 @@ Commands:
   html             Generate HTML dashboard
   install-timer    Install systemd user timer for automated collection
   uninstall-timer  Uninstall systemd user timer
+  completions      Generate shell completion scripts
   help             Print this message or the help of the given subcommand(s)
 
 Options:

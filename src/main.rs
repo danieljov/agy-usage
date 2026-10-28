@@ -1,10 +1,12 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use agy_usage::clock::ClockFormat;
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
+use clap_complete::Shell;
 
 #[derive(Parser)]
 #[command(
@@ -13,7 +15,7 @@ use clap::{Parser, Subcommand, ValueEnum};
     about = "Antigravity quota usage tracker and prognosis"
 )]
 struct Cli {
-    #[arg(long, global = true)]
+    #[arg(long, global = true, value_hint = ValueHint::DirPath)]
     data_dir: Option<PathBuf>,
 
     #[arg(long, global = true, default_value_t = 0.10)]
@@ -76,13 +78,30 @@ enum Commands {
     Html {
         #[arg(long)]
         open: bool,
-        #[arg(long)]
+        #[arg(long, value_hint = ValueHint::FilePath)]
         out: Option<PathBuf>,
     },
     /// Install systemd user timer for automated collection
     InstallTimer,
     /// Uninstall systemd user timer
     UninstallTimer,
+    /// Generate shell completion scripts
+    Completions {
+        /// Target shell
+        shell: Shell,
+    },
+}
+
+fn write_completions(shell: Shell, out: &mut impl Write) -> Result<()> {
+    let mut cmd = Cli::command();
+    let bin_name = cmd.get_name().to_string();
+    let mut buf = Vec::new();
+    clap_complete::generate(shell, &mut cmd, bin_name, &mut buf);
+    match out.write_all(&buf).and_then(|()| out.flush()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(e).context("failed to write shell completions to stdout"),
+    }
 }
 
 fn effective_retention_days(explicit: Option<u32>, history_days: u32) -> Result<u32> {
@@ -120,7 +139,6 @@ fn write_html_atomic(path: &Path, content: &str) -> Result<()> {
     std::fs::create_dir_all(parent)?;
     let mut temp = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("failed to create temporary file in {}", parent.display()))?;
-    use std::io::Write;
     temp.write_all(content.as_bytes())
         .with_context(|| "failed to write html content to temporary file")?;
     temp.flush()
@@ -165,10 +183,17 @@ fn load_reports(
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let retention_days = effective_retention_days(cli.retention_days, cli.history_days)?;
-    let data_dir = resolve_data_dir(cli.data_dir)?;
 
     match cli.command {
+        Commands::Completions { shell } => {
+            write_completions(shell, &mut std::io::stdout())?;
+        }
+        Commands::UninstallTimer => {
+            agy_usage::timer::uninstall()?;
+            println!("uninstalled agy-usage timer");
+        }
         Commands::Collect { no_html } => {
+            let data_dir = resolve_data_dir(cli.data_dir)?;
             let agy_bin = agy_usage::source::agy_bin();
             let json = agy_usage::source::fetch(&agy_bin)?;
             let now = Utc::now();
@@ -205,6 +230,7 @@ fn main() -> Result<()> {
             }
         }
         Commands::Show { once } => {
+            let data_dir = resolve_data_dir(cli.data_dir)?;
             let clock = cli.clock.resolve();
             if once {
                 let now = Utc::now();
@@ -223,6 +249,7 @@ fn main() -> Result<()> {
             }
         }
         Commands::Html { open, out } => {
+            let data_dir = resolve_data_dir(cli.data_dir)?;
             let now = Utc::now();
             let reports = load_reports(
                 &data_dir.join("samples.jsonl"),
@@ -240,6 +267,7 @@ fn main() -> Result<()> {
             }
         }
         Commands::InstallTimer => {
+            let data_dir = resolve_data_dir(cli.data_dir)?;
             let exe = std::env::current_exe()?;
             let agy_bin = agy_usage::source::resolve_agy_bin()?;
             agy_usage::timer::install(
@@ -254,10 +282,6 @@ fn main() -> Result<()> {
             println!("installed and started agy-usage.timer");
             println!("Hint: run 'loginctl enable-linger' to collect while logged out");
         }
-        Commands::UninstallTimer => {
-            agy_usage::timer::uninstall()?;
-            println!("uninstalled agy-usage timer");
-        }
     }
 
     Ok(())
@@ -267,6 +291,27 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    struct FailWriter {
+        write_err: Option<std::io::ErrorKind>,
+        flush_err: Option<std::io::ErrorKind>,
+    }
+
+    impl Write for FailWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if let Some(kind) = self.write_err {
+                return Err(std::io::Error::new(kind, "simulated write failure"));
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            if let Some(kind) = self.flush_err {
+                return Err(std::io::Error::new(kind, "simulated flush failure"));
+            }
+            Ok(())
+        }
+    }
+
     #[test]
     fn test_effective_retention_days() {
         assert_eq!(effective_retention_days(None, 30).unwrap(), 90);
@@ -274,5 +319,47 @@ mod tests {
         assert_eq!(effective_retention_days(Some(30), 30).unwrap(), 30);
         assert_eq!(effective_retention_days(Some(120), 30).unwrap(), 120);
         assert!(effective_retention_days(Some(30), 60).is_err());
+    }
+
+    #[test]
+    fn test_write_completions_handles_broken_pipe_and_propagates_other_io_errors() {
+        let mut buf = Vec::new();
+        write_completions(Shell::Bash, &mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains("agy-usage"));
+        assert!(text.contains("completions"));
+
+        let mut broken_write = FailWriter {
+            write_err: Some(std::io::ErrorKind::BrokenPipe),
+            flush_err: None,
+        };
+        assert!(write_completions(Shell::Zsh, &mut broken_write).is_ok());
+
+        let mut broken_flush = FailWriter {
+            write_err: None,
+            flush_err: Some(std::io::ErrorKind::BrokenPipe),
+        };
+        assert!(write_completions(Shell::Zsh, &mut broken_flush).is_ok());
+
+        let mut denied_write = FailWriter {
+            write_err: Some(std::io::ErrorKind::PermissionDenied),
+            flush_err: None,
+        };
+        let err = write_completions(Shell::Fish, &mut denied_write).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("failed to write shell completions to stdout")
+        );
+
+        let mut denied_flush = FailWriter {
+            write_err: None,
+            flush_err: Some(std::io::ErrorKind::PermissionDenied),
+        };
+        let err_flush = write_completions(Shell::Fish, &mut denied_flush).unwrap_err();
+        assert!(
+            err_flush
+                .to_string()
+                .contains("failed to write shell completions to stdout")
+        );
     }
 }
