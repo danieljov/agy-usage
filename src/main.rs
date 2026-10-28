@@ -264,7 +264,11 @@ fn main() -> Result<()> {
             write_html_atomic(&out_path, &html_content)?;
             println!("wrote HTML dashboard to {}", out_path.display());
             if open {
-                let _ = Command::new("xdg-open").arg(&out_path).status();
+                #[cfg(target_os = "macos")]
+                let opener = "open";
+                #[cfg(not(target_os = "macos"))]
+                let opener = "xdg-open";
+                let _ = Command::new(opener).arg(&out_path).status();
             }
         }
         Commands::InstallTimer => {
@@ -280,8 +284,16 @@ fn main() -> Result<()> {
                 retention_days,
                 cli.clock.explicit(),
             )?;
-            println!("installed and started agy-usage.timer");
-            println!("Hint: run 'loginctl enable-linger' to collect while logged out");
+            #[cfg(target_os = "macos")]
+            println!(
+                "installed and loaded {} launchd agent",
+                agy_usage::timer::LAUNCHD_LABEL
+            );
+            #[cfg(not(target_os = "macos"))]
+            {
+                println!("installed and started agy-usage.timer");
+                println!("Hint: run 'loginctl enable-linger' to collect while logged out");
+            }
         }
     }
 

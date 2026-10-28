@@ -25,9 +25,10 @@ error() {
 OS="$(uname -s)"
 case "${OS}" in
     Linux)
+        TARGET_OS="unknown-linux-gnu"
         ;;
     Darwin)
-        error "Pre-compiled binaries are currently only built for Linux. On macOS, build from source with: cargo install --git https://github.com/danieljov/agy-usage.git"
+        TARGET_OS="apple-darwin"
         ;;
     *)
         error "Unsupported operating system: ${OS}. Build from source with: cargo install --git https://github.com/danieljov/agy-usage.git"
@@ -41,14 +42,14 @@ case "${ARCH}" in
         TARGET_ARCH="x86_64"
         ;;
     aarch64|arm64)
-        error "Pre-compiled binaries for ${ARCH} are not yet available. Build from source with: cargo install --git https://github.com/danieljov/agy-usage.git"
+        TARGET_ARCH="aarch64"
         ;;
     *)
         error "Unsupported architecture: ${ARCH}. Build from source with: cargo install --git https://github.com/danieljov/agy-usage.git"
         ;;
 esac
 
-TARGET_TRIPLE="${TARGET_ARCH}-unknown-linux-gnu"
+TARGET_TRIPLE="${TARGET_ARCH}-${TARGET_OS}"
 REPO="danieljov/agy-usage"
 
 # 3. Determine version

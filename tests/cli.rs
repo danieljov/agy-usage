@@ -526,7 +526,7 @@ fn verify_release_sync(
     }
     for (idx, _) in readme.match_indices("agy-usage-v") {
         let after = &readme[idx + "agy-usage-v".len()..];
-        let found_ver = after.split("-x86_64").next().unwrap_or("");
+        let found_ver = after.split('-').next().unwrap_or("");
         if found_ver != ver {
             return Err(format!(
                 "README.md contains stale tarball version v{found_ver} (expected v{ver})"
@@ -1050,7 +1050,37 @@ fn release_workflow_configures_idempotent_crates_io_publish() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workflow =
         fs::read_to_string(format!("{manifest_dir}/.github/workflows/release.yml")).unwrap();
+    let ci_workflow =
+        fs::read_to_string(format!("{manifest_dir}/.github/workflows/ci.yml")).unwrap();
+    let install_sh = fs::read_to_string(format!("{manifest_dir}/install.sh")).unwrap();
     let readme = fs::read_to_string(format!("{manifest_dir}/README.md")).unwrap();
+
+    // CI workflow enforces MSRV matching Cargo.toml rust-version
+    let msrv = env!("CARGO_PKG_RUST_VERSION");
+    assert!(
+        ci_workflow.contains(&format!("dtolnay/rust-toolchain@{msrv}")),
+        "ci.yml is missing MSRV job using dtolnay/rust-toolchain@{msrv}"
+    );
+
+    // Release workflow builds all 4 target triples
+    for target in [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+    ] {
+        assert!(
+            workflow.contains(target),
+            "release.yml is missing target triple {target}"
+        );
+    }
+
+    // install.sh supports Linux & Darwin on x86_64 & aarch64/arm64
+    assert!(install_sh.contains("unknown-linux-gnu"));
+    assert!(install_sh.contains("apple-darwin"));
+    assert!(install_sh.contains("aarch64|arm64"));
+    assert!(!install_sh.contains("Pre-compiled binaries are currently only built for Linux"));
+    assert!(!install_sh.contains("Pre-compiled binaries for ${ARCH} are not yet available"));
 
     // OIDC Trusted Publishing permission alongside contents: write
     assert!(workflow.contains("contents: write"));
