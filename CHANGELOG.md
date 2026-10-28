@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Discovery, SEO & Security Metadata (`Cargo.toml`, `SECURITY.md`, `examples/generate_demo.rs`, `.github/workflows/pages.yml`)**:
+  - Added `rust-version = "1.88"` (MSRV) to `Cargo.toml` and synchronized `README.md` (`Ensure Rust 1.88+ is installed:`).
+  - Added `SECURITY.md` documenting supported versions and GitHub Private Vulnerability Reporting (`https://github.com/danieljov/agy-usage/security/advisories/new`).
+  - Enriched the GitHub Pages live demo (`examples/generate_demo.rs`) `<head>` with descriptive `<title>`, `<meta name="description">`, `<link rel="canonical">`, OpenGraph (`og:title`, `og:description`, `og:url`, `og:image`), and `twitter:card` metadata while keeping local `agy-usage html` output 100% offline.
+
 ## [0.3.1] - 2026-10-27
 
 ### Fixed

@@ -46,6 +46,9 @@ jobs:
           test -s _site/index.html
           grep -q "gemini-weekly" _site/index.html
           grep -q "Live demo" _site/index.html
+          grep -q '<meta name="description"' _site/index.html
+          grep -q '<link rel="canonical" href="https://danieljov.github.io/agy-usage/">' _site/index.html
+          grep -q 'property="og:image"' _site/index.html
           if grep -q "/\*__AGY_DATA__\*/null" _site/index.html; then
             echo "::error::Dashboard data placeholder was not replaced"
             exit 1
