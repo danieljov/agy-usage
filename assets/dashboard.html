@@ -719,7 +719,18 @@
                                     const visiblePts = minX != null
                                         ? allActualPts.filter(pt => pt.x >= minX)
                                         : allActualPts;
-                                    actualDataset.data = visiblePts;
+                                    if (actualDataset._decimated) {
+                                        delete actualDataset._decimated;
+                                        delete actualDataset._data;
+                                        Object.defineProperty(actualDataset, 'data', {
+                                            configurable: true,
+                                            enumerable: true,
+                                            writable: true,
+                                            value: visiblePts
+                                        });
+                                    } else {
+                                        actualDataset.data = visiblePts;
+                                    }
                                     actualDataset.pointRadius = actualPointRadius(visiblePts);
                                 }
                                 toggleContainer.querySelectorAll('.range-btn').forEach(b => {

@@ -731,6 +731,11 @@ fn draw_status_bar(
 
     let right_len = right_text.width();
     let total_width = area.width as usize;
+    let avail_left = if right_len > 0 {
+        total_width.saturating_sub(right_len + 2)
+    } else {
+        total_width
+    };
 
     let left_text = if state.is_once {
         format!(
@@ -742,31 +747,74 @@ fn draw_status_bar(
             "msg: {} | Esc: Grid  1-9: Focus  {}  r: Refresh  ?: Help  q: Quit",
             msg, range_hint
         );
-        if wide.width() + right_len + 2 <= total_width {
+        let compact = format!(
+            "msg: {} | Esc: Grid 1-9: Focus {} r: Refresh ?: Help q: Quit",
+            msg, range_hint
+        );
+        let tight = format!(
+            "msg: {} | Esc:Grid 1-9:Focus {} r:Refresh ?: Help q:Quit",
+            msg, range_hint
+        );
+        if wide.width() <= avail_left {
             wide
+        } else if compact.width() <= avail_left {
+            compact
+        } else if tight.width() <= avail_left {
+            tight
         } else {
-            format!(
-                "msg: {} | Esc: Grid 1-9: Focus {} r: Refresh ?: Help q: Quit",
-                msg, range_hint
-            )
+            let short_range = if state.time_range == TimeRange::Window {
+                "t".to_string()
+            } else {
+                format!("t({})", state.time_range.label())
+            };
+            let short_suffix = format!(" | Esc 1-9 {} r ?: Help q:Quit", short_range);
+            let min_suffix = " | ?: Help q:Quit";
+            let prefix = "msg: ";
+            if avail_left >= prefix.width() + short_suffix.width() + 4 {
+                let max_msg = avail_left - prefix.width() - short_suffix.width();
+                format!(
+                    "{}{}{}",
+                    prefix,
+                    truncate_to_width(msg, max_msg),
+                    short_suffix
+                )
+            } else if avail_left >= prefix.width() + min_suffix.width() + 4 {
+                let max_msg = avail_left - prefix.width() - min_suffix.width();
+                format!(
+                    "{}{}{}",
+                    prefix,
+                    truncate_to_width(msg, max_msg),
+                    min_suffix
+                )
+            } else {
+                let max_msg = total_width
+                    .saturating_sub(prefix.width() + min_suffix.width())
+                    .max(1);
+                format!(
+                    "{}{}{}",
+                    prefix,
+                    truncate_to_width(msg, max_msg),
+                    min_suffix
+                )
+            }
         }
     } else {
         let wide = format!(
             "Esc: Grid  1-9: Focus  {}  r: Refresh  ?: Help  q: Quit",
             range_hint
         );
-        if wide.width() + right_len + 2 <= total_width {
+        if wide.width() <= avail_left {
             wide
         } else {
             let compact = format!(
                 "Esc: Grid 1-9: Focus {} r: Refresh ?: Help q: Quit",
                 range_hint
             );
-            if compact.width() + right_len + 2 <= total_width {
+            if compact.width() <= avail_left {
                 compact
             } else {
                 let tight = format!("Esc:Grid 1-9:Focus {} r:Refresh ?: Help q:Quit", range_hint);
-                if tight.width() + right_len + 2 <= total_width || compact.width() > total_width {
+                if tight.width() <= avail_left || compact.width() > total_width {
                     tight
                 } else {
                     compact
@@ -849,9 +897,9 @@ fn draw_help_modal(frame: &mut Frame, area: Rect) {
             Span::raw("Even linear pace"),
         ]),
         Line::from(vec![
-            Span::styled("  ── Proj    ", Style::default().fg(Color::Green)),
-            Span::raw("Forecast trajectory       "),
-            Span::styled("│  Reset   ", Style::default().fg(Color::Blue)),
+            Span::styled("  ·· Proj    ", Style::default().fg(Color::Green)),
+            Span::raw("Forecast (green/ylw/red)  "),
+            Span::styled("│  Reset   ", Style::default().fg(Color::White)),
             Span::raw("Window boundary"),
         ]),
         Line::from(vec![
@@ -870,7 +918,7 @@ fn draw_help_modal(frame: &mut Frame, area: Rect) {
             Span::styled("  ⏳ collecting", Style::default().fg(Color::Gray)),
             Span::raw(" Need ≥2 samples · "),
             Span::styled("🚫 disabled", Style::default().fg(Color::DarkGray)),
-            Span::raw(" Weekly limit reached"),
+            Span::raw(" Inactive / limit reached"),
         ]),
     ];
 
@@ -886,6 +934,28 @@ fn draw_help_modal(frame: &mut Frame, area: Rect) {
 
     frame.render_widget(Clear, modal_area);
     frame.render_widget(Paragraph::new(lines).block(block), modal_area);
+}
+
+fn truncate_to_width(s: &str, max_width: usize) -> String {
+    if s.width() <= max_width {
+        return s.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    let budget = max_width.saturating_sub(1);
+    for ch in s.chars() {
+        let w = UnicodeWidthStr::width(ch.encode_utf8(&mut [0; 4]));
+        if used + w > budget {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push('…');
+    out
 }
 
 fn visible_cells(
@@ -1735,23 +1805,33 @@ mod tests {
         assert!(text.contains("last sample 5m ago"));
 
         // Verify 80-column interactive footer keeps both ?: Help and last sample visible
-        // across both default Window range and non-default 30d range
+        // across default Window range, non-default 30d range, and transient status messages
         for range in [TimeRange::Window, TimeRange::D30] {
-            let state_80 = ViewState {
-                time_range: range,
-                ..state.clone()
-            };
-            let mut term_80 = Terminal::new(TestBackend::new(80, 24)).unwrap();
-            term_80.draw(|f| draw(f, &reports, &state_80, now)).unwrap();
-            let buf_80 = term_80.backend().buffer();
-            let mut text_80 = String::new();
-            for x in 0..80 {
-                text_80.push_str(buf_80[(x, 23)].symbol());
+            for msg in [
+                None,
+                Some("Refreshed successfully".to_string()),
+                Some(
+                    "Skipped 3 corrupt lines in /home/user/.local/share/agy-usage/samples.jsonl"
+                        .to_string(),
+                ),
+            ] {
+                let state_80 = ViewState {
+                    time_range: range,
+                    message: msg.clone(),
+                    ..state.clone()
+                };
+                let mut term_80 = Terminal::new(TestBackend::new(80, 24)).unwrap();
+                term_80.draw(|f| draw(f, &reports, &state_80, now)).unwrap();
+                let buf_80 = term_80.backend().buffer();
+                let mut text_80 = String::new();
+                for x in 0..80 {
+                    text_80.push_str(buf_80[(x, 23)].symbol());
+                }
+                assert!(
+                    text_80.contains("?: Help") && text_80.contains("last sample 5m ago"),
+                    "expected 80-col footer ({range:?}, msg={msg:?}) to keep both ?: Help and last sample, got: '{text_80}'"
+                );
             }
-            assert!(
-                text_80.contains("?: Help") && text_80.contains("last sample 5m ago"),
-                "expected 80-col footer ({range:?}) to keep both ?: Help and last sample, got: '{text_80}'"
-            );
         }
     }
 
