@@ -81,9 +81,9 @@ enum Commands {
         #[arg(long, value_hint = ValueHint::FilePath)]
         out: Option<PathBuf>,
     },
-    /// Install systemd user timer for automated collection
+    /// Install background collection timer (systemd on Linux, launchd on macOS)
     InstallTimer,
-    /// Uninstall systemd user timer
+    /// Uninstall background collection timer
     UninstallTimer,
     /// Generate shell completion scripts
     Completions {

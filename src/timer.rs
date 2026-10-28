@@ -192,6 +192,39 @@ fn remove_if_exists(p: &Path) -> Result<()> {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn bootout_if_loaded(gui_domain: &str, plist_path: &Path) -> Result<()> {
+    use std::process::Stdio;
+
+    let service_target = format!("{gui_domain}/{LAUNCHD_LABEL}");
+    let is_loaded = Command::new("launchctl")
+        .args(["print", &service_target])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !is_loaded {
+        return Ok(());
+    }
+
+    let status = Command::new("launchctl")
+        .args(["bootout", &service_target])
+        .status()
+        .or_else(|_| {
+            Command::new("launchctl")
+                .args(["bootout", gui_domain])
+                .arg(plist_path)
+                .status()
+        })
+        .context("failed to run launchctl bootout")?;
+    if !status.success() {
+        bail!("launchctl bootout {} failed", service_target);
+    }
+    Ok(())
+}
+
 pub fn install(
     exe: &Path,
     agy_bin: &Path,
@@ -216,15 +249,12 @@ pub fn install(
             clock,
         )?;
         let plist_path = dir.join(format!("{LAUNCHD_LABEL}.plist"));
-        fs::write(&plist_path, plist_content)
-            .with_context(|| format!("failed to write {}", plist_path.display()))?;
-
         let uid = rustix::process::getuid().as_raw();
         let gui_domain = format!("gui/{uid}");
-        let _ = Command::new("launchctl")
-            .args(["bootout", &gui_domain])
-            .arg(&plist_path)
-            .status();
+        bootout_if_loaded(&gui_domain, &plist_path)?;
+
+        fs::write(&plist_path, plist_content)
+            .with_context(|| format!("failed to write {}", plist_path.display()))?;
 
         let bootstrap = Command::new("launchctl")
             .args(["bootstrap", &gui_domain])
@@ -291,10 +321,7 @@ pub fn uninstall() -> Result<()> {
         let plist_path = dir.join(format!("{LAUNCHD_LABEL}.plist"));
         let uid = rustix::process::getuid().as_raw();
         let gui_domain = format!("gui/{uid}");
-        let _ = Command::new("launchctl")
-            .args(["bootout", &gui_domain])
-            .arg(&plist_path)
-            .status();
+        bootout_if_loaded(&gui_domain, &plist_path)?;
         remove_if_exists(&plist_path)?;
         Ok(())
     }

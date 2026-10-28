@@ -39,6 +39,7 @@ curl -fsSL https://raw.githubusercontent.com/danieljov/agy-usage/main/install.sh
 Pre-compiled standalone binaries for Linux (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`) and macOS (`x86_64-apple-darwin`, `aarch64-apple-darwin`) are published on [GitHub Releases](https://github.com/danieljov/agy-usage/releases/latest).
 
 #### Using `curl`
+Replace `x86_64-unknown-linux-gnu` with `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, or `aarch64-apple-darwin` to match your platform:
 ```bash
 TMP_DIR=$(mktemp -d)
 curl -fsSL https://github.com/danieljov/agy-usage/releases/download/v0.4.0/agy-usage-v0.4.0-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C "$TMP_DIR"
@@ -50,7 +51,8 @@ rm -rf "$TMP_DIR"
 #### Using GitHub CLI (`gh`)
 ```bash
 TMP_DIR=$(mktemp -d)
-gh release download --repo danieljov/agy-usage --pattern "agy-usage-*-x86_64-unknown-linux-gnu.tar.gz" --dir "$TMP_DIR"
+TARGET="x86_64-unknown-linux-gnu" # or aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin
+gh release download --repo danieljov/agy-usage --pattern "agy-usage-*-${TARGET}.tar.gz" --dir "$TMP_DIR"
 tar -xzf "$TMP_DIR"/*.tar.gz -C "$TMP_DIR"
 mkdir -p ~/.local/bin
 mv "$TMP_DIR"/agy-usage-*/agy-usage ~/.local/bin/
@@ -140,8 +142,8 @@ Commands:
   collect          Collect quota samples from agy and update dashboard
   show             Show terminal dashboard
   html             Generate HTML dashboard
-  install-timer    Install systemd user timer for automated collection
-  uninstall-timer  Uninstall systemd user timer
+  install-timer    Install background collection timer (systemd on Linux, launchd on macOS)
+  uninstall-timer  Uninstall background collection timer
   completions      Generate shell completion scripts
   help             Print this message or the help of the given subcommand(s)
 
