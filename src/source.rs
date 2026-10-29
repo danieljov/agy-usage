@@ -289,6 +289,31 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     const FIXTURE_JSON: &str = include_str!("../tests/fixtures/usage.json");
+    const PRO_FIXTURE_JSON: &str = include_str!("../tests/fixtures/usage_pro.json");
+
+    #[test]
+    fn parses_pro_fixture() {
+        let ts = Utc.with_ymd_and_hms(2026, 10, 28, 23, 35, 0).unwrap();
+        let samples = parse_usage(PRO_FIXTURE_JSON, ts).unwrap();
+        assert_eq!(samples.len(), 5);
+
+        assert_eq!(samples[0].group, "Gemini Models");
+        assert_eq!(samples[0].bucket_id, "gemini-weekly");
+        assert_eq!(samples[1].bucket_id, "gemini-5h");
+        assert_eq!(samples[2].group, "Claude and GPT models");
+        assert_eq!(samples[2].bucket_id, "3p-weekly");
+        assert_eq!(samples[3].bucket_id, "3p-5h");
+
+        assert_eq!(samples[4].group, "Gemini 4 Argon");
+        assert_eq!(samples[4].bucket_id, "gemini-argon-wtu-weekly");
+        assert_eq!(samples[4].window, "weekly");
+        assert!((samples[4].remaining - 0.9983522891998291).abs() < 1e-9);
+        assert_eq!(
+            samples[4].reset_time,
+            Some(Utc.with_ymd_and_hms(2026, 11, 4, 9, 49, 12).unwrap())
+        );
+        assert!(!samples[4].disabled);
+    }
 
     #[test]
     fn parses_fixture() {

@@ -17,7 +17,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::clock::ClockFormat;
 use crate::forecast::{BucketReport, Status};
-use crate::model::Sample;
+use crate::model::{Sample, format_window};
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeRange {
@@ -217,10 +217,11 @@ pub fn chart_viewport(rep: &BucketReport, time_range: TimeRange) -> Option<Chart
             .collect()
     };
 
-    let is_5h = rep.window.eq_ignore_ascii_case("5h");
+    let is_short =
+        crate::model::window_length(&rep.window).is_some_and(|d| d < chrono::Duration::hours(24));
     let show_boundaries = match time_range {
         TimeRange::Window | TimeRange::H24 => true,
-        TimeRange::D7 | TimeRange::D30 | TimeRange::All => !is_5h,
+        TimeRange::D7 | TimeRange::D30 | TimeRange::All => !is_short,
     };
 
     let boundary_xs = if show_boundaries {
@@ -240,14 +241,6 @@ pub fn chart_viewport(rep: &BucketReport, time_range: TimeRange) -> Option<Chart
         boundary_xs,
         show_boundaries,
     })
-}
-
-fn format_window(win: &str) -> std::borrow::Cow<'_, str> {
-    match win {
-        "weekly" => "Weekly".into(),
-        "5h" => "5h".into(),
-        other => other.into(),
-    }
 }
 
 fn format_time_ago(dt: DateTime<Utc>, now: DateTime<Utc>) -> String {
@@ -313,19 +306,13 @@ pub fn draw(frame: &mut Frame, reports: &[BucketReport], state: &ViewState, now:
         draw_chart(
             frame,
             &reports[focus_idx],
+            reports,
             chunks[0],
             Some(focus_idx),
             state,
             now,
         );
-        draw_table(
-            frame,
-            &reports[focus_idx..focus_idx + 1],
-            chunks[1],
-            now,
-            Some(focus_idx),
-            state.clock,
-        );
+        draw_table(frame, reports, chunks[1], now, Some(focus_idx), state.clock);
         draw_status_bar(frame, reports, state, chunks[2], now);
         if state.show_help {
             draw_help_modal(frame, area);
@@ -355,7 +342,8 @@ pub fn draw(frame: &mut Frame, reports: &[BucketReport], state: &ViewState, now:
         .split(top_area);
 
     for (r_idx, r_chunk) in row_chunks.iter().enumerate() {
-        let col_constraints = vec![Constraint::Ratio(1, cols as u32); cols];
+        let cols_in_row = reports.len().saturating_sub(r_idx * cols).min(cols);
+        let col_constraints = vec![Constraint::Ratio(1, cols_in_row.max(1) as u32); cols_in_row];
         let col_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints(col_constraints)
@@ -367,6 +355,7 @@ pub fn draw(frame: &mut Frame, reports: &[BucketReport], state: &ViewState, now:
                 draw_chart(
                     frame,
                     &reports[report_idx],
+                    reports,
                     *c_chunk,
                     Some(report_idx),
                     state,
@@ -407,9 +396,11 @@ fn projection_points(rep: &BucketReport, reset_time: DateTime<Utc>) -> Vec<(f64,
     proj_pts
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_chart(
     frame: &mut Frame,
     rep: &BucketReport,
+    all_reports: &[BucketReport],
     area: Rect,
     index: Option<usize>,
     state: &ViewState,
@@ -425,37 +416,25 @@ fn draw_chart(
         String::new()
     };
 
+    let base_label = rep.label(all_reports);
     let mut title = if rep.prognosis.status == Status::Disabled {
         if let Some(idx) = index {
-            format!(
-                "[{}] {} · {}{}  disabled",
-                idx + 1,
-                rep.group,
-                format_window(&rep.window),
-                range_badge,
-            )
+            format!("[{}] {}{}  disabled", idx + 1, base_label, range_badge)
         } else {
-            format!(
-                "{} · {}{}  disabled",
-                rep.group,
-                format_window(&rep.window),
-                range_badge,
-            )
+            format!("{}{}  disabled", base_label, range_badge)
         }
     } else if let Some(idx) = index {
         format!(
-            "[{}] {} · {}{}  {:.0}% left",
+            "[{}] {}{}  {:.0}% left",
             idx + 1,
-            rep.group,
-            format_window(&rep.window),
+            base_label,
             range_badge,
             (rep.prognosis.remaining_now * 100.0).round()
         )
     } else {
         format!(
-            "{} · {}{}  {:.0}% left",
-            rep.group,
-            format_window(&rep.window),
+            "{}{}  {:.0}% left",
+            base_label,
             range_badge,
             (rep.prognosis.remaining_now * 100.0).round()
         )
@@ -626,7 +605,12 @@ fn draw_table(
             .fg(Color::Cyan),
     );
 
-    let rows: Vec<Row> = reports
+    let visible_reports = match focus_idx {
+        Some(idx) => reports.get(idx..=idx).unwrap_or_default(),
+        None => reports,
+    };
+
+    let rows: Vec<Row> = visible_reports
         .iter()
         .enumerate()
         .map(|(i, rep)| {
@@ -652,10 +636,11 @@ fn draw_table(
             let status_str = p.status_label(now);
             let age_str = format_time_ago_compact(p.last_sample, now);
 
+            let group_label = rep.group_label(reports);
             let group_cell = if idx < 9 {
-                format!("[{}] {}", idx + 1, rep.group)
+                format!("[{}] {}", idx + 1, group_label)
             } else {
-                rep.group.clone()
+                group_label
             };
 
             let mut row_cells = vec![
@@ -1558,6 +1543,125 @@ mod tests {
     }
 
     #[test]
+    fn odd_bucket_count_spans_full_width_in_two_column_grid() {
+        let pro_fixture = include_str!("../tests/fixtures/usage_pro.json");
+        let t1 = Utc.with_ymd_and_hms(2026, 10, 28, 22, 35, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 10, 28, 23, 35, 0).unwrap();
+        let mut samples = crate::source::parse_usage(pro_fixture, t1).unwrap();
+        let mut s2 = crate::source::parse_usage(pro_fixture, t2).unwrap();
+        for s in &mut s2 {
+            s.remaining = (s.remaining - 0.01).max(0.0);
+        }
+        samples.extend(s2);
+        let reports = analyze(&samples, 0.10);
+        assert_eq!(reports.len(), 5);
+
+        let now = Utc.with_ymd_and_hms(2026, 10, 28, 23, 40, 0).unwrap();
+        let text = render_plain(&reports, now, 120, 40, ClockFormat::H24);
+
+        // First two chart rows have two side-by-side 60-col boxes ("┐┌" at boundary)
+        let row1_top = text
+            .lines()
+            .find(|l| l.contains("[1] Gemini Models"))
+            .expect("row 1 top border");
+        assert!(
+            row1_top.contains("┐┌"),
+            "expected two columns in row 1: {row1_top}"
+        );
+
+        let row2_top = text
+            .lines()
+            .find(|l| l.contains("[3] Claude and GPT models"))
+            .expect("row 2 top border");
+        assert!(
+            row2_top.contains("┐┌"),
+            "expected two columns in row 2: {row2_top}"
+        );
+
+        // Third chart row has a single trailing bucket ([5] Gemini 4 Argon) and must span full 120 columns
+        let row3_top = text
+            .lines()
+            .find(|l| l.contains("[5] Gemini 4 Argon"))
+            .expect("row 3 top border");
+        assert!(
+            !row3_top.contains("┐┌"),
+            "trailing odd bucket should span full row without split columns: {row3_top}"
+        );
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(row3_top),
+            120,
+            "trailing odd bucket top border must span full 120 columns: {row3_top}"
+        );
+        assert!(row3_top.starts_with('┌') && row3_top.ends_with('┐'));
+    }
+
+    #[test]
+    fn disambiguates_colliding_buckets_in_grid_and_focus_views() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
+        let reset = Some(now + chrono::Duration::days(5));
+        let samples = vec![
+            Sample {
+                ts: now,
+                group: "Gemini Models".to_string(),
+                bucket_id: "gemini-weekly".to_string(),
+                window: "weekly".to_string(),
+                remaining: 0.80,
+                reset_time: reset,
+                disabled: false,
+            },
+            Sample {
+                ts: now,
+                group: "Gemini Models".to_string(),
+                bucket_id: "gemini-argon-weekly".to_string(),
+                window: "weekly".to_string(),
+                remaining: 0.90,
+                reset_time: reset,
+                disabled: false,
+            },
+            Sample {
+                ts: now,
+                group: "Gemini Models".to_string(),
+                bucket_id: "gemini-5h".to_string(),
+                window: "5h".to_string(),
+                remaining: 0.95,
+                reset_time: Some(now + chrono::Duration::hours(4)),
+                disabled: false,
+            },
+        ];
+        let reports = analyze(&samples, 0.10);
+
+        // 1. Grid view disambiguates only the colliding (group, window) pair
+        let grid_text = render_plain(&reports, now, 140, 40, ClockFormat::H24);
+        assert!(grid_text.contains("[1] Gemini Models · Weekly (gemini-argon-weekly)"));
+        assert!(grid_text.contains("[2] Gemini Models · Weekly (gemini-weekly)"));
+        assert!(grid_text.contains("[1] Gemini Models (gemini-argon-weekly)"));
+        assert!(grid_text.contains("[2] Gemini Models (gemini-weekly)"));
+        // Negative boundary: non-colliding 5h bucket in the same group is not suffixed
+        assert!(grid_text.contains("[3] Gemini Models · 5h  95% left"));
+        assert!(!grid_text.contains("Gemini Models · 5h (gemini-5h)"));
+        assert!(!grid_text.contains("Gemini Models (gemini-5h)"));
+
+        // 2. Focus view on bucket 1 preserves the collision disambiguation
+        let backend = TestBackend::new(140, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = ViewState {
+            focus: Some(0),
+            ..Default::default()
+        };
+        terminal.draw(|f| draw(f, &reports, &state, now)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut focus_text = String::new();
+        for y in 0..40 {
+            for x in 0..140 {
+                focus_text.push_str(buffer[(x, y)].symbol());
+            }
+            focus_text.push('\n');
+        }
+        assert!(focus_text.contains("[1] Gemini Models · Weekly (gemini-argon-weekly)"));
+        assert!(focus_text.contains("[1] Gemini Models (gemini-argon-weekly)"));
+    }
+
+    #[test]
     fn empty_state() {
         let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
         let text = render_plain(&[], now, 120, 40, ClockFormat::H24);
@@ -1591,6 +1695,21 @@ mod tests {
         assert!(!text.contains("Gemini Models · Weekly"));
         assert!(!text.contains("Claude and GPT models · Weekly"));
         assert!(!text.contains("Claude and GPT models · 5h"));
+
+        // Negative boundary: out-of-range focus_idx in draw_table renders zero rows
+        terminal
+            .draw(|f| draw_table(f, &reports, f.area(), now, Some(5), ClockFormat::H24))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut table_text = String::new();
+        for y in 0..40 {
+            for x in 0..120 {
+                table_text.push_str(buffer[(x, y)].symbol());
+            }
+            table_text.push('\n');
+        }
+        assert!(!table_text.contains("[6]"));
+        assert!(!table_text.contains("Gemini Models"));
     }
 
     #[test]
@@ -2232,7 +2351,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let state = ViewState::default();
         terminal
-            .draw(|f| draw_chart(f, rep, f.area(), Some(0), &state, t2))
+            .draw(|f| draw_chart(f, rep, &reports, f.area(), Some(0), &state, t2))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let has_green_projection = (0..20)
@@ -2252,7 +2371,17 @@ mod tests {
 
         let mut terminal_collecting = Terminal::new(TestBackend::new(80, 20)).unwrap();
         terminal_collecting
-            .draw(|f| draw_chart(f, &collecting_rep, f.area(), Some(0), &state, t2))
+            .draw(|f| {
+                draw_chart(
+                    f,
+                    &collecting_rep,
+                    std::slice::from_ref(&collecting_rep),
+                    f.area(),
+                    Some(0),
+                    &state,
+                    t2,
+                )
+            })
             .unwrap();
         let buf_collecting = terminal_collecting.backend().buffer();
         let has_proj_when_collecting = (0..20)
@@ -2547,6 +2676,21 @@ mod tests {
             );
             assert!(!vp.boundary_xs.is_empty());
         }
+
+        // 3. Other short windows (< 24h, e.g. 12h) suppress boundaries on D7+, while daily (>= 24h) keeps them
+        let mut rep_12h = rep_5h.clone();
+        rep_12h.window = "12h".to_string();
+        assert!(
+            !chart_viewport(&rep_12h, TimeRange::D7)
+                .unwrap()
+                .show_boundaries
+        );
+
+        let mut rep_daily = rep_weekly.clone();
+        rep_daily.window = "daily".to_string();
+        let vp_daily_7d = chart_viewport(&rep_daily, TimeRange::D7).unwrap();
+        assert!(vp_daily_7d.show_boundaries);
+        assert!(!vp_daily_7d.boundary_xs.is_empty());
     }
 
     #[test]
