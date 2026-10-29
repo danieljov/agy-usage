@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-29
+
 ### Added
 - **Pro Account Quota & Generalized Window Support (`src/model.rs`, `src/forecast.rs`, `src/tui.rs`, `src/html.rs`, `assets/dashboard.html`)**:
   - Added support for `"daily"` (`24h`) and strict positive `<N>h`, `<N>d`, `<N>w` quota window durations up to 7 days (`model::window_length`), with burn-rate lookback computed as `(window_length / 5).clamp(15m, 24h)` (`model::lookback`). Windows longer than 7 days return `None` and trigger the full-history analysis fallback (`forecast::supports_bounded_analysis`).
@@ -167,6 +169,7 @@ Initial release of `agy-usage`: quota history, burn-rate prognosis, and interact
   - Standalone, stripped Linux x86_64 binary archives with SHA-256 checksums published via automated GitHub Release workflow.
   - Automated one-line curl installation script (`install.sh`) with automated SHA-256 checksum verification.
 
+[0.5.0]: https://github.com/danieljov/agy-usage/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/danieljov/agy-usage/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/danieljov/agy-usage/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/danieljov/agy-usage/compare/v0.2.0...v0.3.0
