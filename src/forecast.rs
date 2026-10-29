@@ -96,6 +96,38 @@ pub struct BucketReport {
     pub prognosis: Prognosis,
 }
 
+impl BucketReport {
+    /// Whether another report in `reports` shares the exact same `(group, window)`.
+    pub fn has_collision(&self, reports: &[BucketReport]) -> bool {
+        reports
+            .iter()
+            .filter(|r| r.group == self.group && r.window == self.window)
+            .count()
+            > 1
+    }
+
+    /// Display label for chart titles and the HTML table (`"{group} · {window}"`,
+    /// or `"{group} · {window} ({bucket_id})"` when `(group, window)` collides).
+    pub fn label(&self, reports: &[BucketReport]) -> String {
+        let win = crate::model::format_window(&self.window);
+        if self.has_collision(reports) {
+            format!("{} · {} ({})", self.group, win, self.bucket_id)
+        } else {
+            format!("{} · {}", self.group, win)
+        }
+    }
+
+    /// Group cell text for the TUI table (`"{group}"`, or `"{group} ({bucket_id})"`
+    /// when `(group, window)` collides).
+    pub fn group_label(&self, reports: &[BucketReport]) -> String {
+        if self.has_collision(reports) {
+            format!("{} ({})", self.group, self.bucket_id)
+        } else {
+            self.group.clone()
+        }
+    }
+}
+
 /// Lifts transient in-window reservation hold dips to the tightest non-increasing
 /// upper envelope supported by later samples in the same reset window.
 ///
@@ -502,7 +534,8 @@ pub fn analyze_owned(samples: Vec<Sample>, tight: f64) -> Vec<BucketReport> {
         });
     }
 
-    // Sort reports by group order, then within group weekly, 5h, then alphabetical
+    // Sort reports by group order, then within group by window length (longest to shortest,
+    // unknown last), then alphabetical by (window, bucket_id).
     reports.sort_by(|a, b| {
         let g_idx_a = group_order
             .iter()
@@ -516,15 +549,11 @@ pub fn analyze_owned(samples: Vec<Sample>, tight: f64) -> Vec<BucketReport> {
             return g_idx_a.cmp(&g_idx_b);
         }
 
-        let win_rank = |w: &str| match w {
-            "weekly" => 0,
-            "5h" => 1,
-            _ => 2,
-        };
-        let w_a = win_rank(&a.window);
-        let w_b = win_rank(&b.window);
-        if w_a != w_b {
-            return w_a.cmp(&w_b);
+        match (window_length(&a.window), window_length(&b.window)) {
+            (Some(la), Some(lb)) if la != lb => return lb.cmp(&la),
+            (Some(_), None) => return std::cmp::Ordering::Less,
+            (None, Some(_)) => return std::cmp::Ordering::Greater,
+            _ => {}
         }
 
         (&a.window, &a.bucket_id).cmp(&(&b.window, &b.bucket_id))
@@ -694,6 +723,156 @@ mod tests {
         assert_eq!(rep_5h.prognosis.status, Status::Disabled);
         assert_eq!(rep_5h.window_start, None);
         assert_eq!(rep_5h.prognosis.last_sample, t_latest);
+    }
+
+    #[test]
+    fn analyze_pro_fixture_and_exhausted_argon_does_not_orphan_gemini_5h() {
+        let pro_json = include_str!("../tests/fixtures/usage_pro.json");
+        let t1 = Utc.with_ymd_and_hms(2026, 10, 28, 22, 35, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 10, 28, 23, 35, 0).unwrap();
+        let mut s1 = crate::source::parse_usage(pro_json, t1).unwrap();
+        let mut s2 = crate::source::parse_usage(pro_json, t2).unwrap();
+
+        // Exhaust Argon weekly in latest poll and drop gemini-5h from latest poll:
+        // because Argon is in "Gemini 4 Argon" and gemini-weekly is still > 0.005,
+        // gemini-5h must NOT be marked Disabled/orphaned.
+        s2.retain(|s| s.bucket_id != "gemini-5h");
+        for s in &mut s2 {
+            if s.bucket_id == "gemini-argon-wtu-weekly" {
+                s.remaining = 0.0;
+            }
+        }
+        s1.extend(s2);
+
+        let reports = analyze(&s1, 0.10);
+        assert_eq!(reports.len(), 5);
+        assert_eq!(reports[4].group, "Gemini 4 Argon");
+        assert_eq!(reports[4].bucket_id, "gemini-argon-wtu-weekly");
+        assert_eq!(reports[4].prognosis.status, Status::WillRunOut);
+
+        let gemini_5h = reports.iter().find(|r| r.bucket_id == "gemini-5h").unwrap();
+        assert_ne!(
+            gemini_5h.prognosis.status,
+            Status::Disabled,
+            "exhausted Argon weekly quota must not mark gemini-5h as disabled"
+        );
+    }
+
+    #[test]
+    fn label_and_group_label_disambiguate_only_on_exact_group_and_window_collision() {
+        let t = base_time();
+        let reset = Some(t + Duration::days(5));
+        let samples = vec![
+            Sample {
+                ts: t,
+                group: "Gemini Models".to_string(),
+                bucket_id: "gemini-weekly".to_string(),
+                window: "weekly".to_string(),
+                remaining: 0.8,
+                reset_time: reset,
+                disabled: false,
+            },
+            Sample {
+                ts: t,
+                group: "Gemini Models".to_string(),
+                bucket_id: "gemini-argon-weekly".to_string(),
+                window: "weekly".to_string(),
+                remaining: 0.9,
+                reset_time: reset,
+                disabled: false,
+            },
+            Sample {
+                ts: t,
+                group: "Gemini Models".to_string(),
+                bucket_id: "gemini-5h".to_string(),
+                window: "5h".to_string(),
+                remaining: 0.95,
+                reset_time: Some(t + Duration::hours(4)),
+                disabled: false,
+            },
+            Sample {
+                ts: t,
+                group: "Claude and GPT models".to_string(),
+                bucket_id: "3p-weekly".to_string(),
+                window: "weekly".to_string(),
+                remaining: 0.7,
+                reset_time: reset,
+                disabled: false,
+            },
+        ];
+        let reports = analyze(&samples, 0.10);
+        assert_eq!(reports.len(), 4);
+
+        // Colliding (group, window) pair gets (bucket_id) suffix
+        assert_eq!(
+            reports[0].label(&reports),
+            "Gemini Models · Weekly (gemini-argon-weekly)"
+        );
+        assert_eq!(
+            reports[0].group_label(&reports),
+            "Gemini Models (gemini-argon-weekly)"
+        );
+        assert_eq!(
+            reports[1].label(&reports),
+            "Gemini Models · Weekly (gemini-weekly)"
+        );
+        assert_eq!(
+            reports[1].group_label(&reports),
+            "Gemini Models (gemini-weekly)"
+        );
+
+        // Negative boundaries: different window in same group or same window in different group stay clean
+        assert_eq!(reports[2].label(&reports), "Gemini Models · 5h");
+        assert_eq!(reports[2].group_label(&reports), "Gemini Models");
+        assert_eq!(reports[3].label(&reports), "Claude and GPT models · Weekly");
+        assert_eq!(reports[3].group_label(&reports), "Claude and GPT models");
+    }
+
+    #[test]
+    fn sorts_buckets_by_window_length_longest_to_shortest_with_unknown_last() {
+        let t = base_time();
+        let mk = |bucket_id: &str, window: &str| Sample {
+            ts: t,
+            group: "Gemini Models".to_string(),
+            bucket_id: bucket_id.to_string(),
+            window: window.to_string(),
+            remaining: 0.8,
+            reset_time: Some(t + Duration::days(7)),
+            disabled: false,
+        };
+        let samples = vec![
+            mk("b-unknown", "monthly"),
+            mk("b-1h", "1h"),
+            mk("b-5h", "5h"),
+            mk("b-daily", "daily"),
+            mk("b-weekly", "weekly"),
+        ];
+        let reports = analyze(&samples, 0.10);
+        let ordered_windows: Vec<&str> = reports.iter().map(|r| r.window.as_str()).collect();
+        assert_eq!(
+            ordered_windows,
+            vec!["weekly", "daily", "5h", "1h", "monthly"]
+        );
+    }
+
+    #[test]
+    fn windows_exceeding_7d_cap_require_full_history() {
+        let t = base_time();
+        for over_cap in ["8d", "2w", "169h"] {
+            let sample = Sample {
+                ts: t,
+                group: "Gemini Models".to_string(),
+                bucket_id: "g-long".to_string(),
+                window: over_cap.to_string(),
+                remaining: 0.8,
+                reset_time: Some(t + Duration::days(14)),
+                disabled: false,
+            };
+            assert!(
+                !supports_bounded_analysis(&[sample]),
+                "window {over_cap:?} exceeds 7d cap and must trigger full-history fallback"
+            );
+        }
     }
 
     #[test]
@@ -997,8 +1176,8 @@ mod tests {
             Sample {
                 ts: ts1,
                 group: "Custom".to_string(),
-                bucket_id: "custom-daily".to_string(),
-                window: "daily".to_string(),
+                bucket_id: "custom-monthly".to_string(),
+                window: "monthly".to_string(),
                 remaining: 0.8,
                 reset_time: Some(reset),
                 disabled: false,
@@ -1006,8 +1185,8 @@ mod tests {
             Sample {
                 ts: ts2,
                 group: "Custom".to_string(),
-                bucket_id: "custom-daily".to_string(),
-                window: "daily".to_string(),
+                bucket_id: "custom-monthly".to_string(),
+                window: "monthly".to_string(),
                 remaining: 0.6,
                 reset_time: Some(reset),
                 disabled: false,

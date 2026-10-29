@@ -14,6 +14,8 @@ struct CompactReport<'a> {
     group: &'a str,
     bucket_id: &'a str,
     window: &'a str,
+    label: String,
+    window_secs: Option<i64>,
     window_start: Option<DateTime<Utc>>,
     reset_time: Option<DateTime<Utc>>,
     boundaries: Vec<DateTime<Utc>>,
@@ -50,6 +52,8 @@ pub fn render(
                 group: &r.group,
                 bucket_id: &r.bucket_id,
                 window: &r.window,
+                label: r.label(reports),
+                window_secs: crate::model::window_length(&r.window).map(|d| d.num_seconds()),
                 window_start: r.window_start,
                 reset_time: r.prognosis.reset_time,
                 // Like `series`, limited to the displayed history so the output does
@@ -168,8 +172,50 @@ mod tests {
         let rep = make_report("3p Models", "3p-5h", "5h", vec![s]);
         let output = render(&[rep], now, 30, ClockFormat::H24);
         assert!(output.contains("\"bucket_id\":\"3p-5h\""));
+        assert!(output.contains("\"label\":\"3p Models · 5h\""));
         assert!(output.contains("\"series\":[["));
         assert!(!output.contains("/*__AGY_DATA__*/"));
+    }
+
+    #[test]
+    fn disambiguates_colliding_bucket_labels_in_dashboard_data() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
+        let s1 = Sample {
+            ts: now,
+            group: "Gemini Models".to_string(),
+            bucket_id: "gemini-weekly".to_string(),
+            window: "weekly".to_string(),
+            remaining: 0.8,
+            reset_time: Some(now + Duration::days(6)),
+            disabled: false,
+        };
+        let s2 = Sample {
+            bucket_id: "gemini-argon-weekly".to_string(),
+            remaining: 0.9,
+            ..s1.clone()
+        };
+        let s3 = Sample {
+            bucket_id: "gemini-5h".to_string(),
+            window: "5h".to_string(),
+            reset_time: Some(now + Duration::hours(4)),
+            ..s1.clone()
+        };
+        let reports = vec![
+            make_report("Gemini Models", "gemini-weekly", "weekly", vec![s1]),
+            make_report("Gemini Models", "gemini-argon-weekly", "weekly", vec![s2]),
+            make_report("Gemini Models", "gemini-5h", "5h", vec![s3]),
+        ];
+        let output = render(&reports, now, 30, ClockFormat::H24);
+        let val: serde_json::Value = serde_json::from_str(&extract_json(&output)).unwrap();
+        let reps = val["reports"].as_array().unwrap();
+        assert_eq!(reps[0]["label"], "Gemini Models · Weekly (gemini-weekly)");
+        assert_eq!(
+            reps[1]["label"],
+            "Gemini Models · Weekly (gemini-argon-weekly)"
+        );
+        // Negative boundary: non-colliding 5h bucket in the same group is not suffixed
+        assert_eq!(reps[2]["label"], "Gemini Models · 5h");
+        assert!(output.contains("const title = rep.label;"));
     }
 
     #[test]
@@ -316,6 +362,16 @@ mod tests {
             disabled: false,
         };
         let rep_5h = make_report("3p Models", "3p-5h", "5h", vec![s_5h]);
+        let s_daily = Sample {
+            ts: now,
+            group: "Gemini".to_string(),
+            bucket_id: "gemini-daily".to_string(),
+            window: "daily".to_string(),
+            remaining: 0.9,
+            reset_time: Some(now + Duration::hours(20)),
+            disabled: false,
+        };
+        let rep_daily = make_report("Gemini", "gemini-daily", "daily", vec![s_daily]);
         let s_weekly = Sample {
             ts: now,
             group: "Gemini".to_string(),
@@ -326,10 +382,19 @@ mod tests {
             disabled: false,
         };
         let rep_weekly = make_report("Gemini", "gemini-weekly", "weekly", vec![s_weekly]);
-        let output = render(&[rep_5h, rep_weekly], now, 30, ClockFormat::H24);
+        let output = render(&[rep_5h, rep_daily, rep_weekly], now, 30, ClockFormat::H24);
+        let val: serde_json::Value = serde_json::from_str(&extract_json(&output)).unwrap();
+        let reps = val["reports"].as_array().unwrap();
+        assert_eq!(reps[0]["window_secs"], 18_000);
+        assert_eq!(reps[1]["window_secs"], 86_400);
+        assert_eq!(reps[1]["label"], "Gemini · Daily");
+        assert_eq!(reps[2]["window_secs"], 604_800);
 
         // UI markup & styling
         assert!(output.contains(".range-toggle"));
+        assert!(output.contains(".chart-card:last-child:nth-child(odd)"));
+        assert!(output.contains("grid-column: 1 / -1"));
+        assert!(output.contains("min-width: 0;"));
         assert!(output.contains(".range-btn"));
         assert!(output.contains(".range-btn:focus-visible"));
         assert!(output.contains("class=\"range-toggle\""));
@@ -353,13 +418,21 @@ mod tests {
             "chart.options.scales.x.min = Math.min(endMs - 5 * 3600 * 1000, lastSampleMs);"
         ));
 
-        // Boundary restoration on 7d/30d for weekly cards
-        assert!(output.contains("chart.options.plugins.boundaries.display = !is5h;"));
+        // Boundary restoration on 7d/30d for non-short cards
+        assert!(
+            output.contains("const isShort = rep.window_secs != null && rep.window_secs < 86400;")
+        );
+        assert!(output.contains("chart.options.plugins.boundaries.display = !isShort;"));
 
-        // Window-aware defaults in chart initialization: 5h defaults to 5h, weekly defaults to 7d
-        assert!(output.contains(
-            "const rawMin = is5h ? (endMs - 5 * 3600 * 1000) : (endMs - 7 * 86400 * 1000);"
-        ));
+        // Window-aware defaults in chart initialization: initial viewport matches active button (5h for short, 7d for long)
+        assert!(output.contains("\"window_secs\":18000"));
+        assert!(output.contains("\"window_secs\":86400"));
+        assert!(output.contains("\"window_secs\":604800"));
+        assert!(
+            output
+                .contains("const rawMin = endMs - (isShort ? 5 * 3600 * 1000 : 7 * 86400 * 1000);")
+        );
+        assert!(!output.contains("const winMs ="));
         assert!(output.contains("const initialMin = Math.min(rawMin, lastSampleMs);"));
         assert!(
             output.contains(
@@ -374,9 +447,9 @@ mod tests {
         assert!(output.contains("chart.options.scales.x.max"));
         assert!(output.contains("chart.update('none')"));
 
-        // Template exclusivity: 5h template has 5h active default; weekly has 7d active default
+        // Template exclusivity: short template has 5h active default; long/weekly has 7d active default
         let (_, range_section) = output
-            .split_once("const rangeHtml = isDis ? '' : (is5h ? `")
+            .split_once("const rangeHtml = isDis ? '' : (isShort ? `")
             .expect("rangeHtml section found");
         let (h_5h, h_weekly) = range_section
             .split_once("` : `")

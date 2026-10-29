@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Pro Account Quota & Generalized Window Support (`src/model.rs`, `src/forecast.rs`, `src/tui.rs`, `src/html.rs`, `assets/dashboard.html`)**:
+  - Added support for `"daily"` (`24h`) and strict positive `<N>h`, `<N>d`, `<N>w` quota window durations up to 7 days (`model::window_length`), with burn-rate lookback computed as `(window_length / 5).clamp(15m, 24h)` (`model::lookback`). Windows longer than 7 days return `None` and trigger the full-history analysis fallback (`forecast::supports_bounded_analysis`).
+  - Added single-source-of-truth label disambiguation (`BucketReport::has_collision`, `BucketReport::label`, `BucketReport::group_label`) that appends `({bucket_id})` only when multiple buckets in a report slice share the exact same `(group, window)`.
+  - Added a Google AI Pro `/usage` fixture (`tests/fixtures/usage_pro.json`, 3 groups / 5 buckets including `"Gemini 4 Argon"` `gemini-argon-wtu-weekly`) and full-width trailing card layout in 2-column TUI and HTML dashboard grids when the bucket count is odd.
+
+### Changed
+- Sorted quota buckets within each group by `model::window_length` from longest to shortest with unknown windows last (`forecast::analyze_owned`).
+- Generalized short-window (`< 24h`) boundary decluttering and range-toggle templates across the TUI (`tui::chart_viewport`) and HTML dashboard (`CompactReport.window_secs`).
+
 ## [0.4.0] - 2026-10-28
 
 ### Added

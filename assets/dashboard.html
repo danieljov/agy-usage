@@ -78,8 +78,12 @@
             .charts-grid {
                 grid-template-columns: 1fr 1fr;
             }
+            .chart-card:last-child:nth-child(odd) {
+                grid-column: 1 / -1;
+            }
         }
         .chart-card {
+            min-width: 0;
             background: var(--surface);
             border: 1px solid var(--border);
             border-radius: 8px;
@@ -254,13 +258,6 @@
                 .replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;')
                 .replace(/'/g, '&#039;');
-        }
-
-        function formatWindow(win) {
-            if (!win) return '';
-            if (win === 'weekly') return 'Weekly';
-            if (win === '5h') return '5h';
-            return win.charAt(0).toUpperCase() + win.slice(1);
         }
 
         function formatTimeAgo(date) {
@@ -480,8 +477,7 @@
             data.reports.forEach((rep, idx) => {
                 const p = rep.prognosis;
                 const isDis = p.status === 'Disabled';
-                const winFormatted = formatWindow(rep.window);
-                const title = `${rep.group} · ${winFormatted}`;
+                const title = rep.label;
 
                 const leftStr = isDis ? '—' : `${(p.remaining_now * 100).toFixed(1)}%`;
                 const rateStr = (isDis || p.rate_per_h == null) ? '—' : `${(p.rate_per_h * 100).toFixed(2)}%/h`;
@@ -508,8 +504,8 @@
                 const badgeText = isDis ? 'disabled' : `${leftStr} left`;
                 const badgeClass = isDis ? 'badge badge-disabled' : 'badge';
 
-                const is5h = !!rep.window && rep.window.toLowerCase() === '5h';
-                const rangeHtml = isDis ? '' : (is5h ? `
+                const isShort = rep.window_secs != null && rep.window_secs < 86400;
+                const rangeHtml = isDis ? '' : (isShort ? `
                     <div class="range-toggle" role="group" aria-label="Time range" data-idx="${idx}">
                         <button type="button" class="range-btn active" data-range="5h" aria-pressed="true">5h</button>
                         <button type="button" class="range-btn" data-range="24h" aria-pressed="false">24h</button>
@@ -546,7 +542,7 @@
                 const rawLastMs = p.last_sample ? new Date(p.last_sample).getTime() : NaN;
                 const lastSampleMs = !isNaN(rawLastMs) ? rawLastMs : nowMs;
                 const endMs = (!isNaN(resetMs) && resetMs > nowMs) ? resetMs : Math.max(nowMs, lastSampleMs);
-                const rawMin = is5h ? (endMs - 5 * 3600 * 1000) : (endMs - 7 * 86400 * 1000);
+                const rawMin = endMs - (isShort ? 5 * 3600 * 1000 : 7 * 86400 * 1000);
                 const initialMin = Math.min(rawMin, lastSampleMs);
 
                 // Actual series
@@ -692,19 +688,19 @@
                             if (range === '5h') {
                                 chart.options.scales.x.min = Math.min(endMs - 5 * 3600 * 1000, lastSampleMs);
                                 chart.options.scales.x.max = endMs;
-                                if (is5h) chart.options.plugins.boundaries.display = true;
+                                if (isShort) chart.options.plugins.boundaries.display = true;
                             } else if (range === '24h') {
                                 chart.options.scales.x.min = Math.min(endMs - 24 * 3600 * 1000, lastSampleMs);
                                 chart.options.scales.x.max = endMs;
-                                if (is5h) chart.options.plugins.boundaries.display = true;
+                                if (isShort) chart.options.plugins.boundaries.display = true;
                             } else if (range === '7d') {
                                 chart.options.scales.x.min = Math.min(endMs - 7 * 86400 * 1000, lastSampleMs);
                                 chart.options.scales.x.max = endMs;
-                                chart.options.plugins.boundaries.display = !is5h;
+                                chart.options.plugins.boundaries.display = !isShort;
                             } else if (range === '30d') {
                                 chart.options.scales.x.min = Math.min(endMs - 30 * 86400 * 1000, lastSampleMs);
                                 chart.options.scales.x.max = endMs;
-                                chart.options.plugins.boundaries.display = !is5h;
+                                chart.options.plugins.boundaries.display = !isShort;
                             } else if (range === 'all') {
                                 delete chart.options.scales.x.min;
                                 chart.options.scales.x.max = endMs;
