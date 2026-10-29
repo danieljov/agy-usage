@@ -42,7 +42,7 @@ Pre-compiled standalone binaries for Linux (`x86_64-unknown-linux-gnu`, `aarch64
 Replace `x86_64-unknown-linux-gnu` with `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, or `aarch64-apple-darwin` to match your platform:
 ```bash
 TMP_DIR=$(mktemp -d)
-curl -fsSL https://github.com/danieljov/agy-usage/releases/download/v0.4.0/agy-usage-v0.4.0-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C "$TMP_DIR"
+curl -fsSL https://github.com/danieljov/agy-usage/releases/download/v0.5.0/agy-usage-v0.5.0-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C "$TMP_DIR"
 mkdir -p ~/.local/bin
 mv "$TMP_DIR"/agy-usage-*/agy-usage ~/.local/bin/
 rm -rf "$TMP_DIR"
