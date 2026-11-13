@@ -209,36 +209,119 @@ fn check_samples_store(
 fn check_html_dashboard(data_dir: &Path) -> DoctorCheck {
     let html_path = data_dir.join("dashboard.html");
     match std::fs::metadata(&html_path) {
-        Ok(meta) if !meta.is_file() => DoctorCheck {
+        Ok(meta) if !meta.is_file() => {
+            return DoctorCheck {
+                name: "html_dashboard".to_string(),
+                level: CheckLevel::Fail,
+                message: format!("{} is not a regular file", html_path.display()),
+                detail: None,
+            };
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return DoctorCheck {
+                name: "html_dashboard".to_string(),
+                level: CheckLevel::Warn,
+                message: "dashboard.html has not been generated yet".to_string(),
+                detail: Some("run `agy-usage html` or `agy-usage collect`".to_string()),
+            };
+        }
+        Err(e) => {
+            return DoctorCheck {
+                name: "html_dashboard".to_string(),
+                level: CheckLevel::Fail,
+                message: format!("cannot inspect {}: {e}", html_path.display()),
+                detail: None,
+            };
+        }
+        Ok(_) => {}
+    }
+
+    let mut file = match std::fs::File::open(&html_path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return DoctorCheck {
+                name: "html_dashboard".to_string(),
+                level: CheckLevel::Warn,
+                message: "dashboard.html has not been generated yet".to_string(),
+                detail: Some("run `agy-usage html` or `agy-usage collect`".to_string()),
+            };
+        }
+        Err(e) => {
+            return DoctorCheck {
+                name: "html_dashboard".to_string(),
+                level: CheckLevel::Fail,
+                message: format!("cannot read {}: {e}", html_path.display()),
+                detail: None,
+            };
+        }
+    };
+    let len = match file.metadata() {
+        Ok(meta) => meta.len(),
+        Err(e) => {
+            return DoctorCheck {
+                name: "html_dashboard".to_string(),
+                level: CheckLevel::Fail,
+                message: format!("cannot inspect {}: {e}", html_path.display()),
+                detail: None,
+            };
+        }
+    };
+
+    use std::io::Read as _;
+    let mut probe = [0u8; 1];
+    match file.read(&mut probe) {
+        Err(e) => DoctorCheck {
             name: "html_dashboard".to_string(),
             level: CheckLevel::Fail,
-            message: format!("{} is not a regular file", html_path.display()),
+            message: format!("cannot read {}: {e}", html_path.display()),
             detail: None,
         },
-        Ok(meta) if meta.len() == 0 => DoctorCheck {
+        Ok(0) => DoctorCheck {
             name: "html_dashboard".to_string(),
             level: CheckLevel::Warn,
             message: format!("{} is empty (0 bytes)", html_path.display()),
             detail: Some("run `agy-usage html` to regenerate the dashboard".to_string()),
         },
-        Ok(meta) => DoctorCheck {
+        Ok(_) => DoctorCheck {
             name: "html_dashboard".to_string(),
             level: CheckLevel::Ok,
-            message: format!("dashboard.html present ({} bytes)", meta.len()),
+            message: format!("dashboard.html present ({len} bytes)"),
             detail: None,
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DoctorCheck {
-            name: "html_dashboard".to_string(),
-            level: CheckLevel::Warn,
-            message: "dashboard.html has not been generated yet".to_string(),
-            detail: Some("run `agy-usage html` or `agy-usage collect`".to_string()),
-        },
-        Err(e) => DoctorCheck {
-            name: "html_dashboard".to_string(),
+    }
+}
+
+fn read_timer_file(path: &Path) -> Result<Option<String>, DoctorCheck> {
+    match std::fs::metadata(path) {
+        Ok(meta) if !meta.is_file() => {
+            return Err(DoctorCheck {
+                name: "timer".to_string(),
+                level: CheckLevel::Fail,
+                message: format!("{} is not a regular file", path.display()),
+                detail: None,
+            });
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(DoctorCheck {
+                name: "timer".to_string(),
+                level: CheckLevel::Fail,
+                message: format!("cannot inspect {}: {e}", path.display()),
+                detail: None,
+            });
+        }
+        Ok(_) => {}
+    }
+
+    match std::fs::read_to_string(path) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(DoctorCheck {
+            name: "timer".to_string(),
             level: CheckLevel::Fail,
-            message: format!("cannot inspect {}: {e}", html_path.display()),
+            message: format!("cannot read {}: {e}", path.display()),
             detail: None,
-        },
+        }),
     }
 }
 
@@ -260,53 +343,41 @@ fn check_timer(timer_dir: &Result<PathBuf, String>, is_macos: bool) -> (DoctorCh
 
     if is_macos {
         let plist = dir.join(format!("{}.plist", timer::LAUNCHD_LABEL));
-        if plist.is_file() {
-            match std::fs::read_to_string(&plist) {
-                Ok(s) => {
-                    let secs = timer::parse_launchd_interval_seconds(&s);
-                    let mins = secs
-                        .and_then(|v| u16::try_from(v / 60).ok())
-                        .filter(|&m| m > 0);
-                    if let (Some(secs), Some(mins)) = (secs, mins) {
-                        (
-                            DoctorCheck {
-                                name: "timer".to_string(),
-                                level: CheckLevel::Ok,
-                                message: format!("launchd agent installed at {}", plist.display()),
-                                detail: Some(format!("StartInterval={secs}s")),
-                            },
-                            Some(mins),
-                        )
-                    } else {
-                        (
-                            DoctorCheck {
-                                name: "timer".to_string(),
-                                level: CheckLevel::Warn,
-                                message: format!(
-                                    "launchd plist at {} has missing or invalid StartInterval",
-                                    plist.display()
-                                ),
-                                detail: Some(
-                                    "staleness check falls back to 15m; re-run `agy-usage install-timer` to repair"
-                                        .to_string(),
-                                ),
-                            },
-                            None,
-                        )
-                    }
+        match read_timer_file(&plist) {
+            Ok(Some(s)) => {
+                let secs = timer::parse_launchd_interval_seconds(&s);
+                let mins = secs
+                    .and_then(|v| u16::try_from(v / 60).ok())
+                    .filter(|&m| m > 0);
+                if let (Some(secs), Some(mins)) = (secs, mins) {
+                    (
+                        DoctorCheck {
+                            name: "timer".to_string(),
+                            level: CheckLevel::Ok,
+                            message: format!("launchd agent installed at {}", plist.display()),
+                            detail: Some(format!("StartInterval={secs}s")),
+                        },
+                        Some(mins),
+                    )
+                } else {
+                    (
+                        DoctorCheck {
+                            name: "timer".to_string(),
+                            level: CheckLevel::Warn,
+                            message: format!(
+                                "launchd plist at {} has missing or invalid StartInterval",
+                                plist.display()
+                            ),
+                            detail: Some(
+                                "staleness check falls back to 15m; re-run `agy-usage install-timer` to repair"
+                                    .to_string(),
+                            ),
+                        },
+                        None,
+                    )
                 }
-                Err(e) => (
-                    DoctorCheck {
-                        name: "timer".to_string(),
-                        level: CheckLevel::Fail,
-                        message: format!("cannot read {}: {e}", plist.display()),
-                        detail: None,
-                    },
-                    None,
-                ),
             }
-        } else {
-            (
+            Ok(None) => (
                 DoctorCheck {
                     name: "timer".to_string(),
                     level: CheckLevel::Warn,
@@ -316,77 +387,52 @@ fn check_timer(timer_dir: &Result<PathBuf, String>, is_macos: bool) -> (DoctorCh
                     ),
                 },
                 None,
-            )
+            ),
+            Err(fail_check) => (fail_check, None),
         }
     } else {
         let service = dir.join("agy-usage.service");
         let unit = dir.join("agy-usage.timer");
-        match (service.is_file(), unit.is_file()) {
-            (true, true) => {
-                if let Err(e) = std::fs::read_to_string(&service) {
-                    return (
+        match (read_timer_file(&service), read_timer_file(&unit)) {
+            (Err(fail_check), _) | (_, Err(fail_check)) => (fail_check, None),
+            (Ok(Some(_)), Ok(Some(s))) => {
+                let cal = s
+                    .lines()
+                    .find(|l| l.trim_start().starts_with("OnCalendar="))
+                    .map(|l| l.trim().to_string());
+                let mins = timer::parse_systemd_interval_minutes(&s).filter(|&m| m > 0);
+                if let Some(mins) = mins {
+                    (
                         DoctorCheck {
                             name: "timer".to_string(),
-                            level: CheckLevel::Fail,
-                            message: format!("cannot read {}: {e}", service.display()),
-                            detail: None,
+                            level: CheckLevel::Ok,
+                            message: format!("systemd user timer installed in {}", dir.display()),
+                            detail: cal,
                         },
-                        None,
-                    );
-                }
-                match std::fs::read_to_string(&unit) {
-                    Ok(s) => {
-                        let cal = s
-                            .lines()
-                            .find(|l| l.trim_start().starts_with("OnCalendar="))
-                            .map(|l| l.trim().to_string());
-                        let mins = timer::parse_systemd_interval_minutes(&s).filter(|&m| m > 0);
-                        if let Some(mins) = mins {
-                            (
-                                DoctorCheck {
-                                    name: "timer".to_string(),
-                                    level: CheckLevel::Ok,
-                                    message: format!(
-                                        "systemd user timer installed in {}",
-                                        dir.display()
-                                    ),
-                                    detail: cal,
-                                },
-                                Some(mins),
-                            )
-                        } else {
-                            let detail = match cal {
-                                Some(spec) => format!(
-                                    "{spec}; staleness check falls back to 15m; re-run `agy-usage install-timer` to repair"
-                                ),
-                                None => "staleness check falls back to 15m; re-run `agy-usage install-timer` to repair".to_string(),
-                            };
-                            (
-                                DoctorCheck {
-                                    name: "timer".to_string(),
-                                    level: CheckLevel::Warn,
-                                    message: format!(
-                                        "systemd timer at {} has missing or invalid OnCalendar interval",
-                                        unit.display()
-                                    ),
-                                    detail: Some(detail),
-                                },
-                                None,
-                            )
-                        }
-                    }
-                    Err(e) => (
+                        Some(mins),
+                    )
+                } else {
+                    let detail = match cal {
+                        Some(spec) => format!(
+                            "{spec}; staleness check falls back to 15m; re-run `agy-usage install-timer` to repair"
+                        ),
+                        None => "staleness check falls back to 15m; re-run `agy-usage install-timer` to repair".to_string(),
+                    };
+                    (
                         DoctorCheck {
                             name: "timer".to_string(),
-                            level: CheckLevel::Fail,
-                            message: format!("cannot read {}: {e}", unit.display()),
-                            detail: None,
+                            level: CheckLevel::Warn,
+                            message: format!(
+                                "systemd timer at {} has missing or invalid OnCalendar interval",
+                                unit.display()
+                            ),
+                            detail: Some(detail),
                         },
                         None,
-                    ),
+                    )
                 }
             }
-            (false, false) => (
+            (Ok(None), Ok(None)) => (
                 DoctorCheck {
                     name: "timer".to_string(),
                     level: CheckLevel::Warn,
@@ -397,13 +443,14 @@ fn check_timer(timer_dir: &Result<PathBuf, String>, is_macos: bool) -> (DoctorCh
                 },
                 None,
             ),
-            (has_service, has_timer) => (
+            (Ok(svc), Ok(timer_unit)) => (
                 DoctorCheck {
                     name: "timer".to_string(),
                     level: CheckLevel::Warn,
                     message: format!(
                         "partial systemd timer installation (service={}, timer={})",
-                        has_service, has_timer
+                        svc.is_some(),
+                        timer_unit.is_some()
                     ),
                     detail: Some("re-run `agy-usage install-timer` to repair units".to_string()),
                 },
@@ -884,5 +931,72 @@ mod tests {
         let timer_sd = report_sd.checks.iter().find(|c| c.name == "timer").unwrap();
         assert_eq!(timer_sd.level, CheckLevel::Warn);
         assert!(timer_sd.message.contains("missing or invalid OnCalendar"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_dashboard_and_inaccessible_timer_dir_fail_doctor() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let timer_dir = dir.path().join("timers");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&timer_dir).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
+
+        let html_path = data_dir.join("dashboard.html");
+        std::fs::write(&html_path, "<html>secret</html>").unwrap();
+        std::fs::set_permissions(&html_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        std::fs::write(
+            timer_dir.join("agy-usage.timer"),
+            "[Timer]\nOnCalendar=*:0/5\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&timer_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        if std::fs::File::open(&html_path).is_err()
+            && std::fs::metadata(timer_dir.join("agy-usage.timer")).is_err()
+        {
+            let report = evaluate_checks(&DoctorContext {
+                data_dir: &data_dir,
+                agy_resolution: Ok(PathBuf::from("/usr/bin/agy")),
+                timer_dir: Ok(timer_dir.clone()),
+                detected_clock: ClockFormat::H24,
+                desktop_env: Some("GNOME".to_string()),
+                is_macos: false,
+                now,
+            });
+            assert!(!report.healthy);
+            let html_check = report
+                .checks
+                .iter()
+                .find(|c| c.name == "html_dashboard")
+                .unwrap();
+            assert_eq!(html_check.level, CheckLevel::Fail);
+            let timer_check = report.checks.iter().find(|c| c.name == "timer").unwrap();
+            assert_eq!(timer_check.level, CheckLevel::Fail);
+
+            // Also verify macOS launchd path propagates metadata permission errors as Fail.
+            let report_mac = evaluate_checks(&DoctorContext {
+                data_dir: &data_dir,
+                agy_resolution: Ok(PathBuf::from("/usr/bin/agy")),
+                timer_dir: Ok(timer_dir.clone()),
+                detected_clock: ClockFormat::H24,
+                desktop_env: None,
+                is_macos: true,
+                now,
+            });
+            let timer_mac = report_mac
+                .checks
+                .iter()
+                .find(|c| c.name == "timer")
+                .unwrap();
+            assert_eq!(timer_mac.level, CheckLevel::Fail);
+        }
+
+        std::fs::set_permissions(&timer_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&html_path, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
 }

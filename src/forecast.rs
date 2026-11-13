@@ -424,6 +424,38 @@ pub fn analyze_since(samples: Vec<Sample>, cutoff: DateTime<Utc>, tight: f64) ->
     reports
 }
 
+/// Extracts the lowercase quota-family stem from `bucket_id` relative to `window`
+/// (e.g. `("gemini-5h", "5h") -> Some("gemini")`, `("gemini-argon-weekly", "weekly") -> Some("gemini-argon")`,
+/// `("c-24h-exhausted", "24h") -> Some("c")`). Returns `None` when `bucket_id` does not
+/// carry `window` as a delimited token or has no non-empty family prefix, preventing
+/// unrelated families in the same group from orphaning one another.
+fn bucket_family(bucket_id: &str, window: &str) -> Option<String> {
+    if bucket_id.is_empty() || window.is_empty() {
+        return None;
+    }
+    let id_lower = bucket_id.to_ascii_lowercase();
+    let win_lower = window.to_ascii_lowercase();
+    let bytes = id_lower.as_bytes();
+
+    for (idx, _) in id_lower.rmatch_indices(&win_lower) {
+        if idx < 2 {
+            continue;
+        }
+        let prev = bytes[idx - 1];
+        if prev != b'-' && prev != b'_' {
+            continue;
+        }
+        let after = idx + win_lower.len();
+        if after == bytes.len() || bytes[after] == b'-' || bytes[after] == b'_' {
+            let prefix = &id_lower[..idx - 1];
+            if !prefix.is_empty() {
+                return Some(prefix.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Analyzes borrowed samples. Clones every sample; prefer [`analyze_owned`] when the
 /// caller does not need to keep `samples`.
 pub fn analyze(samples: &[Sample], tight: f64) -> Vec<BucketReport> {
@@ -453,22 +485,25 @@ pub fn analyze_owned(samples: Vec<Sample>, tight: f64) -> Vec<BucketReport> {
         }
     }
 
-    // Track the longest enabled exhausted window per group in the latest batch
-    // (used to detect shorter-window siblings that stopped being reported because
-    // a longer-window limit in the same group was reached).
-    let mut exhausted_max_window: Vec<(String, Duration)> = Vec::new();
+    // Track the longest enabled exhausted window per (group, family) in the latest batch
+    // (used to detect shorter-window siblings of the same quota family that stopped being
+    // reported because a longer-window limit was reached).
+    let mut exhausted_max_window: Vec<(String, String, Duration)> = Vec::new();
     for s in samples.iter().filter(|s| s.ts == latest_ts) {
         if !s.disabled
             && s.remaining <= 0.005
             && let Some(dur) = window_length(&s.window)
+            && let Some(family) = bucket_family(&s.bucket_id, &s.window)
         {
-            if let Some((_, max_dur)) = exhausted_max_window.iter_mut().find(|(g, _)| *g == s.group)
+            if let Some((_, _, max_dur)) = exhausted_max_window
+                .iter_mut()
+                .find(|(g, f, _)| *g == s.group && *f == family)
             {
                 if dur > *max_dur {
                     *max_dur = dur;
                 }
             } else {
-                exhausted_max_window.push((s.group.clone(), dur));
+                exhausted_max_window.push((s.group.clone(), family, dur));
             }
         }
     }
@@ -503,14 +538,16 @@ pub fn analyze_owned(samples: Vec<Sample>, tight: f64) -> Vec<BucketReport> {
 
         let l_dur = window_length(&last.window);
         // Detect if an enabled shorter-window bucket was skipped in collection because
-        // an enabled longer-window sibling in the same group was exhausted.
+        // an enabled longer-window sibling of the same quota family was exhausted.
         let is_orphaned_by_longer_limit = !last.disabled
             && last.ts < latest_ts
             && l_dur.is_some_and(|dur| {
-                exhausted_max_window
-                    .iter()
-                    .find(|(g, _)| *g == group)
-                    .is_some_and(|(_, max_dur)| *max_dur > dur)
+                bucket_family(&bucket_id, &last.window).is_some_and(|family| {
+                    exhausted_max_window
+                        .iter()
+                        .find(|(g, f, _)| *g == group && *f == family)
+                        .is_some_and(|(_, _, max_dur)| *max_dur > dur)
+                })
             });
 
         let window_start = if last.disabled || is_orphaned_by_longer_limit {
@@ -2059,5 +2096,52 @@ mod tests {
         samples[4].remaining = 1.0;
         let rep_plateau = &analyze(&samples, 0.10)[0];
         assert_eq!(rep_plateau.prognosis.status, Status::OnTrack);
+    }
+
+    #[test]
+    fn exhausted_bucket_does_not_orphan_unrelated_family_in_same_group() {
+        let t_old = base_time() - Duration::hours(4);
+        let t_latest = base_time();
+        let mk = |ts, id: &str, window: &str, rem| Sample {
+            ts,
+            group: "Gemini Models".to_string(),
+            bucket_id: id.to_string(),
+            window: window.to_string(),
+            remaining: rem,
+            reset_time: Some(ts + Duration::hours(24)),
+            disabled: false,
+        };
+
+        let samples = vec![
+            mk(t_old, "argon-5h", "5h", 0.65),
+            mk(t_old, "gemini-5h", "5h", 0.80),
+            mk(t_latest, "gemini-weekly", "weekly", 0.0),
+        ];
+        let reports = analyze(&samples, 0.10);
+        let find = |id: &str| reports.iter().find(|r| r.bucket_id == id).unwrap();
+
+        assert_eq!(find("gemini-5h").prognosis.status, Status::Disabled);
+        assert_ne!(
+            find("argon-5h").prognosis.status,
+            Status::Disabled,
+            "exhausted gemini-weekly must not orphan unrelated argon-5h in the same group"
+        );
+
+        // Similarly, gemini-argon-weekly must not orphan gemini-5h.
+        let samples_nested = vec![
+            mk(t_old, "gemini-5h", "5h", 0.80),
+            mk(t_latest, "gemini-argon-weekly", "weekly", 0.0),
+        ];
+        let reports_nested = analyze(&samples_nested, 0.10);
+        assert_ne!(
+            reports_nested
+                .iter()
+                .find(|r| r.bucket_id == "gemini-5h")
+                .unwrap()
+                .prognosis
+                .status,
+            Status::Disabled,
+            "exhausted gemini-argon-weekly must not orphan gemini-5h"
+        );
     }
 }
