@@ -48,9 +48,9 @@ const DEMO_HEAD_META: &str = r#"<title>agy-usage — Google Antigravity Quota &a
 /// Notice shown at the top of the hosted demo so visitors arriving from the
 /// repository homepage know the data is synthetic and frozen at build time.
 const DEMO_BANNER: &str = r#"
-    <div role="note" style="margin:0 0 1.5rem;padding:0.75rem 1rem;border:1px solid #30363d;border-radius:8px;background:#161b22;color:#c9d1d9;font-size:0.9rem;">
+    <div id="demo-banner" role="note" style="margin:0 0 1.5rem;padding:0.75rem 1rem;border:1px solid var(--border, #30363d);border-radius:8px;background:var(--surface, #161b22);color:var(--text, #c9d1d9);font-size:0.9rem;">
         <strong>Live demo</strong> &mdash; synthetic quota data generated at build time, so relative times and statuses age until the next rebuild.
-        Install <a href="https://github.com/danieljov/agy-usage" style="color:#58a6ff;">agy-usage</a> to track your own Antigravity quota.
+        Install <a href="https://github.com/danieljov/agy-usage" style="color:var(--accent-text, #58a6ff);">agy-usage</a> to track your own Antigravity quota.
     </div>"#;
 
 /// Renders the demo dashboard HTML for the synthetic dataset ending at `now`.

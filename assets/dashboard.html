@@ -6,15 +6,60 @@
     <title>agy-usage dashboard</title>
     <style>
         :root {
+            color-scheme: dark;
             --bg: #0f172a;
             --surface: #1e293b;
             --border: #334155;
             --text: #f8fafc;
             --text-dim: #94a3b8;
             --accent: #38bdf8;
+            --accent-text: #38bdf8;
             --danger: #ef4444;
             --warning: #f59e0b;
             --success: #10b981;
+            --table-head-bg: rgba(255, 255, 255, 0.03);
+            --toggle-bg: rgba(15, 23, 42, 0.6);
+            --btn-hover-bg: rgba(255, 255, 255, 0.05);
+            --btn-active-bg: rgba(56, 189, 248, 0.16);
+            --badge-bg: rgba(56, 189, 248, 0.15);
+            --badge-disabled-bg: rgba(148, 163, 184, 0.15);
+            --badge-disabled-text: #cbd5e1;
+            --chart-grid: rgba(255, 255, 255, 0.05);
+            --chart-tick: #94a3b8;
+            --chart-boundary: rgba(255, 255, 255, 0.2);
+            --chart-crosshair: rgba(148, 163, 184, 0.45);
+            --chart-budget: #64748b;
+            --tooltip-bg: rgba(15, 23, 42, 0.95);
+            --tooltip-text: #f8fafc;
+            --tooltip-border: #334155;
+        }
+        [data-theme="light"] {
+            color-scheme: light;
+            --bg: #f8fafc;
+            --surface: #ffffff;
+            --border: #cbd5e1;
+            --text: #0f172a;
+            --text-dim: #475569;
+            --accent: #0284c7;
+            --accent-text: #075985;
+            --danger: #dc2626;
+            --warning: #d97706;
+            --success: #059669;
+            --table-head-bg: rgba(15, 23, 42, 0.03);
+            --toggle-bg: #f1f5f9;
+            --btn-hover-bg: rgba(15, 23, 42, 0.06);
+            --btn-active-bg: rgba(2, 132, 199, 0.14);
+            --badge-bg: rgba(2, 132, 199, 0.12);
+            --badge-disabled-bg: rgba(71, 85, 105, 0.12);
+            --badge-disabled-text: #334155;
+            --chart-grid: rgba(15, 23, 42, 0.08);
+            --chart-tick: #475569;
+            --chart-boundary: rgba(15, 23, 42, 0.22);
+            --chart-crosshair: rgba(71, 85, 105, 0.55);
+            --chart-budget: #64748b;
+            --tooltip-bg: rgba(255, 255, 255, 0.96);
+            --tooltip-text: #0f172a;
+            --tooltip-border: #cbd5e1;
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -28,14 +73,52 @@
             margin-bottom: 2rem;
             display: flex;
             justify-content: space-between;
-            align-items: baseline;
+            align-items: center;
             flex-wrap: wrap;
             gap: 1rem;
             border-bottom: 1px solid var(--border);
             padding-bottom: 1rem;
         }
+        .header-title {
+            display: flex;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 0.35rem 1rem;
+        }
         h1 { font-size: 1.5rem; font-weight: 600; color: var(--text); }
         .meta { color: var(--text-dim); font-size: 0.875rem; }
+        .header-controls {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+        .header-btn {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+            font-size: 0.75rem;
+            font-weight: 500;
+            padding: 0.3rem 0.65rem;
+            border-radius: 6px;
+            cursor: pointer;
+            line-height: 1.2;
+            transition: color 0.15s ease, background 0.15s ease;
+        }
+        .header-btn:hover {
+            color: var(--text);
+            background: var(--btn-hover-bg);
+        }
+        .header-btn:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 1px;
+        }
+        .header-btn.active {
+            background: var(--btn-active-bg);
+            border-color: var(--accent);
+            color: var(--accent-text);
+            font-weight: 600;
+        }
         #empty-state {
             background: var(--surface);
             border: 1px dashed var(--border);
@@ -64,7 +147,7 @@
             border-bottom: 1px solid var(--border);
         }
         th {
-            background: rgba(255, 255, 255, 0.03);
+            background: var(--table-head-bg);
             color: var(--text-dim);
             font-weight: 600;
         }
@@ -103,7 +186,8 @@
         }
         .range-toggle {
             display: inline-flex;
-            background: rgba(15, 23, 42, 0.6);
+            flex-wrap: wrap;
+            background: var(--toggle-bg);
             border: 1px solid var(--border);
             border-radius: 6px;
             padding: 2px;
@@ -115,7 +199,7 @@
             color: var(--text-dim);
             font-size: 0.75rem;
             font-weight: 500;
-            padding: 0.15rem 0.5rem;
+            padding: 0.15rem 0.45rem;
             border-radius: 4px;
             cursor: pointer;
             line-height: 1.2;
@@ -123,15 +207,15 @@
         }
         .range-btn:hover {
             color: var(--text);
-            background: rgba(255, 255, 255, 0.05);
+            background: var(--btn-hover-bg);
         }
         .range-btn:focus-visible {
             outline: 2px solid var(--accent);
             outline-offset: 1px;
         }
         .range-btn.active {
-            background: rgba(56, 189, 248, 0.2);
-            color: var(--accent);
+            background: var(--btn-active-bg);
+            color: var(--accent-text);
             font-weight: 600;
         }
         .badge {
@@ -139,26 +223,51 @@
             font-weight: 600;
             padding: 0.2rem 0.5rem;
             border-radius: 4px;
-            background: rgba(56, 189, 248, 0.15);
-            color: var(--accent);
+            background: var(--badge-bg);
+            color: var(--accent-text);
         }
         .badge.badge-disabled {
-            background: rgba(148, 163, 184, 0.15);
-            color: var(--text-dim);
+            background: var(--badge-disabled-bg);
+            color: var(--badge-disabled-text);
         }
         .chart-box {
             position: relative;
             height: 260px;
             width: 100%;
         }
+        @media (max-width: 640px) {
+            body { padding: 1rem; }
+            th, td { padding: 0.5rem 0.65rem; }
+        }
     </style>
+    <script>
+        try {
+            if (window.localStorage.getItem('agy-usage-theme') === 'light') {
+                document.documentElement.setAttribute('data-theme', 'light');
+            }
+        } catch (_) {}
+    </script>
     <script>/*__CHART_JS__*/</script>
     <script>/*__DATE_FNS_ADAPTER__*/</script>
 </head>
 <body>
     <header>
-        <h1>agy-usage dashboard</h1>
-        <div id="gen-meta" class="meta"></div>
+        <div class="header-title">
+            <h1>agy-usage dashboard</h1>
+            <div id="gen-meta" class="meta"></div>
+        </div>
+        <div class="header-controls">
+            <div id="global-range-toggle" class="range-toggle" role="group" aria-label="Global time range">
+                <button type="button" class="range-btn" data-range="window" aria-pressed="false">Window</button>
+                <button type="button" class="range-btn" data-range="5h" aria-pressed="false">5h</button>
+                <button type="button" class="range-btn" data-range="24h" aria-pressed="false">24h</button>
+                <button type="button" class="range-btn" data-range="7d" aria-pressed="false">7d</button>
+                <button type="button" class="range-btn" data-range="30d" aria-pressed="false">30d</button>
+                <button type="button" class="range-btn" data-range="all" aria-pressed="false">All</button>
+            </div>
+            <button type="button" id="auto-reload-btn" class="header-btn" aria-pressed="false" aria-label="Auto 60s reload" title="Auto-reload every 60s when visible">Auto 60s</button>
+            <button type="button" id="theme-toggle-btn" class="header-btn" aria-pressed="false" aria-label="Light mode" title="Toggle dark/light theme">Light mode</button>
+        </div>
     </header>
 
     <div id="empty-state" style="display: none;">
@@ -251,7 +360,7 @@
         }
 
         function escapeHtml(s) {
-            if (!s) return '';
+            if (s === null || s === undefined) return '';
             return String(s)
                 .replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;')
@@ -261,7 +370,9 @@
         }
 
         function formatTimeAgo(date) {
+            if (!(date instanceof Date) || !isFinite(date.getTime())) return '—';
             const sec = Math.floor((Date.now() - date.getTime()) / 1000);
+            if (sec < 0) return 'just now';
             if (sec < 60) return `${sec}s ago`;
             const min = Math.floor(sec / 60);
             if (min < 60) return `${min}m ago`;
@@ -296,6 +407,45 @@
             return `${formatTimeUntil(rDate, nowMs)} (${rDate.toLocaleTimeString(undefined, TIME_OPTS)})`;
         }
 
+        const STORAGE_THEME = 'agy-usage-theme';
+        const STORAGE_AUTO_RELOAD = 'agy-usage-auto-reload';
+        const AUTO_RELOAD_MS = 60000;
+
+        function readStorage(key) {
+            try {
+                return window.localStorage.getItem(key);
+            } catch (_) {
+                return null;
+            }
+        }
+
+        function writeStorage(key, value) {
+            try {
+                window.localStorage.setItem(key, value);
+            } catch (_) {
+                // Ignore storage failures in restricted contexts
+            }
+        }
+
+        function getThemeColors() {
+            const styles = getComputedStyle(document.documentElement);
+            const css = (name, fallback) => styles.getPropertyValue(name).trim() || fallback;
+            return {
+                accent: css('--accent', '#38bdf8'),
+                danger: css('--danger', '#ef4444'),
+                warning: css('--warning', '#f59e0b'),
+                success: css('--success', '#10b981'),
+                grid: css('--chart-grid', 'rgba(255, 255, 255, 0.05)'),
+                tick: css('--chart-tick', '#94a3b8'),
+                boundary: css('--chart-boundary', 'rgba(255, 255, 255, 0.2)'),
+                crosshair: css('--chart-crosshair', 'rgba(148, 163, 184, 0.45)'),
+                budget: css('--chart-budget', '#64748b'),
+                tooltipBg: css('--tooltip-bg', 'rgba(15, 23, 42, 0.95)'),
+                tooltipText: css('--tooltip-text', '#f8fafc'),
+                tooltipBorder: css('--tooltip-border', '#334155')
+            };
+        }
+
         const boundaryPlugin = {
             id: 'boundaries',
             beforeDraw: (chart) => {
@@ -306,7 +456,7 @@
                 if (!chart.chartArea || !chart.scales?.x) return;
                 const { ctx, chartArea: { top, bottom, left, right }, scales: { x } } = chart;
                 ctx.save();
-                ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+                ctx.strokeStyle = getThemeColors().boundary;
                 ctx.lineWidth = 1;
                 ctx.setLineDash([3, 3]);
                 dates.forEach(timeMs => {
@@ -323,7 +473,209 @@
         };
 
         const chartInstances = [];
+        const cardStates = [];
         let isSyncingCrosshair = false;
+
+        function sliceSeriesFrom(pts, cutoffMs) {
+            if (!pts || pts.length === 0) return [];
+            if (cutoffMs == null || !Number.isFinite(cutoffMs)) return pts.slice();
+
+            let lo = 0;
+            let hi = pts.length;
+            while (lo < hi) {
+                const mid = (lo + hi) >> 1;
+                if (pts[mid].x < cutoffMs) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+
+            if (lo >= pts.length) return [];
+            if (lo === 0 || pts[lo].x === cutoffMs) return pts.slice(lo);
+
+            const prev = pts[lo - 1];
+            const next = pts[lo];
+            const dx = next.x - prev.x;
+            const leftY = (dx <= 0 || prev.y === next.y)
+                ? prev.y
+                : prev.y + ((cutoffMs - prev.x) / dx) * (next.y - prev.y);
+
+            return [{ x: cutoffMs, y: leftY }, ...pts.slice(lo)];
+        }
+
+        function updateDatasetPoints(ds, nextPts) {
+            if (ds._decimated) {
+                delete ds._decimated;
+                delete ds._data;
+                Object.defineProperty(ds, 'data', {
+                    configurable: true,
+                    enumerable: true,
+                    writable: true,
+                    value: nextPts
+                });
+            } else {
+                ds.data = nextPts;
+            }
+        }
+
+        const FIXED_RANGES = {
+            '5h': { spanMs: 5 * 3600 * 1000, boundaries: () => true },
+            '24h': { spanMs: 24 * 3600 * 1000, boundaries: () => true },
+            '7d': { spanMs: 7 * 86400 * 1000, boundaries: isShort => !isShort },
+            '30d': { spanMs: 30 * 86400 * 1000, boundaries: isShort => !isShort }
+        };
+
+        function computeRangeBounds(state, range) {
+            const {
+                isShort,
+                endMs,
+                windowEndMs,
+                lastSampleMs,
+                windowStartMs,
+                fallbackSpanMs
+            } = state;
+            if (range === 'window') {
+                const winMax = Number.isFinite(windowEndMs) ? windowEndMs : endMs;
+                if (Number.isFinite(windowStartMs)) {
+                    return {
+                        minX: Math.min(windowStartMs, lastSampleMs),
+                        maxX: winMax,
+                        boundariesDisplay: true
+                    };
+                }
+                const maxX = (winMax - fallbackSpanMs <= lastSampleMs) ? winMax : lastSampleMs;
+                return {
+                    minX: maxX - fallbackSpanMs,
+                    maxX,
+                    boundariesDisplay: true
+                };
+            }
+            if (Object.prototype.hasOwnProperty.call(FIXED_RANGES, range)) {
+                const spec = FIXED_RANGES[range];
+                const maxX = (endMs - spec.spanMs <= lastSampleMs) ? endMs : lastSampleMs;
+                return {
+                    minX: maxX - spec.spanMs,
+                    maxX,
+                    boundariesDisplay: spec.boundaries(isShort)
+                };
+            }
+            if (range === 'all') {
+                return {
+                    minX: null,
+                    maxX: endMs,
+                    boundariesDisplay: false
+                };
+            }
+            return null;
+        }
+
+        function applyCardRange(cardIdx, range) {
+            const state = cardStates[cardIdx];
+            if (!state || !state.chart) return false;
+            const bounds = computeRangeBounds(state, range);
+            if (!bounds) return false;
+            const {
+                chart,
+                allActualPts,
+                actualDataset,
+                actualPointRadius,
+                toggleContainer
+            } = state;
+
+            const minX = bounds.minX;
+            if (minX === null) {
+                delete chart.options.scales.x.min;
+            } else {
+                chart.options.scales.x.min = minX;
+            }
+            chart.options.scales.x.max = bounds.maxX;
+            chart.options.plugins.boundaries.display = bounds.boundariesDisplay;
+
+            if (actualDataset) {
+                const visiblePts = sliceSeriesFrom(allActualPts, minX);
+                updateDatasetPoints(actualDataset, visiblePts);
+                actualDataset.pointRadius = actualPointRadius(visiblePts);
+            }
+            chart.data.datasets.forEach(ds => {
+                if (ds !== actualDataset && ds._decimated) {
+                    updateDatasetPoints(ds, ds._data || ds.data);
+                }
+            });
+
+            state.currentRange = range;
+            if (toggleContainer) {
+                toggleContainer.querySelectorAll('.range-btn').forEach(b => {
+                    const isActive = b.dataset.range === range;
+                    b.classList.toggle('active', isActive);
+                    b.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+                });
+            }
+            clearSyncedCrosshair(null);
+            chart.update('none');
+            return true;
+        }
+
+        function syncGlobalRangeButtons() {
+            const globalToggle = document.getElementById('global-range-toggle');
+            if (!globalToggle) return;
+            const activeStates = cardStates.filter(s => s && s.chart);
+            const commonRange = activeStates.length > 0 && activeStates.every(s => s.currentRange === activeStates[0].currentRange)
+                ? activeStates[0].currentRange
+                : null;
+            globalToggle.querySelectorAll('.range-btn').forEach(b => {
+                const isActive = commonRange !== null && b.dataset.range === commonRange;
+                b.classList.toggle('active', isActive);
+                b.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+            });
+        }
+
+        function applyTheme(theme, themeBtn) {
+            const isLight = theme === 'light';
+            if (isLight) {
+                document.documentElement.setAttribute('data-theme', 'light');
+            } else {
+                document.documentElement.removeAttribute('data-theme');
+            }
+            if (themeBtn) {
+                themeBtn.classList.toggle('active', isLight);
+                themeBtn.setAttribute('aria-pressed', isLight ? 'true' : 'false');
+            }
+            const colors = getThemeColors();
+            chartInstances.forEach(chart => {
+                const xScale = chart.options.scales?.x;
+                const yScale = chart.options.scales?.y;
+                if (xScale) {
+                    xScale.grid.color = colors.grid;
+                    xScale.ticks.color = colors.tick;
+                }
+                if (yScale) {
+                    yScale.grid.color = colors.grid;
+                    yScale.ticks.color = colors.tick;
+                }
+                if (chart.options.plugins?.legend?.labels) {
+                    chart.options.plugins.legend.labels.color = colors.tick;
+                }
+                if (chart.options.plugins?.tooltip) {
+                    chart.options.plugins.tooltip.backgroundColor = colors.tooltipBg;
+                    chart.options.plugins.tooltip.titleColor = colors.tooltipText;
+                    chart.options.plugins.tooltip.bodyColor = colors.tooltipText;
+                    chart.options.plugins.tooltip.borderColor = colors.tooltipBorder;
+                }
+                chart.data.datasets.forEach(ds => {
+                    if (ds.label === 'Actual') {
+                        ds.borderColor = colors.accent;
+                        ds.backgroundColor = colors.accent;
+                    } else if (ds.label === 'Budget') {
+                        ds.borderColor = colors.budget;
+                    } else if (ds.label === 'Projection') {
+                        const st = chart.$prognosisStatus;
+                        ds.borderColor = st === 'WillRunOut' ? colors.danger : (st === 'Tight' ? colors.warning : colors.success);
+                    }
+                });
+                chart.update('none');
+            });
+        }
 
         function findNearestActualIndex(pts, targetMs) {
             if (!pts || pts.length === 0) return -1;
@@ -384,7 +736,7 @@
                     let activeElements = [];
                     let tooltipPos = { x: xScale.getPixelForValue(targetMs), y: area.top };
                     const actualIdx = sibling.data.datasets.findIndex(d => d.label === 'Actual');
-                    if (actualIdx !== -1) {
+                    if (actualIdx !== -1 && sibling.isDatasetVisible(actualIdx)) {
                         const pts = sibling.data.datasets[actualIdx].data || [];
                         const nearestIdx = findNearestActualIndex(pts, targetMs);
                         const spanMs = Math.max(1, xScale.max - xScale.min);
@@ -439,7 +791,7 @@
                 const xPos = x.getPixelForValue(timeMs);
                 if (!Number.isFinite(xPos) || xPos < left || xPos > right) return;
                 ctx.save();
-                ctx.strokeStyle = 'rgba(148, 163, 184, 0.45)';
+                ctx.strokeStyle = getThemeColors().crosshair;
                 ctx.lineWidth = 1;
                 ctx.setLineDash([4, 4]);
                 ctx.beginPath();
@@ -458,11 +810,74 @@
             const emptyEl = document.getElementById('empty-state');
             const contentEl = document.getElementById('content');
             const metaEl = document.getElementById('gen-meta');
+            const globalRangeEl = document.getElementById('global-range-toggle');
+            const autoReloadBtn = document.getElementById('auto-reload-btn');
+            const themeBtn = document.getElementById('theme-toggle-btn');
+
+            let currentTheme = readStorage(STORAGE_THEME) === 'light' ? 'light' : 'dark';
+            applyTheme(currentTheme, themeBtn);
+            if (themeBtn) {
+                themeBtn.addEventListener('click', () => {
+                    currentTheme = currentTheme === 'light' ? 'dark' : 'light';
+                    writeStorage(STORAGE_THEME, currentTheme);
+                    applyTheme(currentTheme, themeBtn);
+                });
+            }
+
+            let autoReloadEnabled = readStorage(STORAGE_AUTO_RELOAD) === 'true';
+            let autoReloadTimer = null;
+
+            function stopAutoReloadTimer() {
+                if (autoReloadTimer !== null) {
+                    clearInterval(autoReloadTimer);
+                    autoReloadTimer = null;
+                }
+            }
+
+            function scheduleAutoReload() {
+                stopAutoReloadTimer();
+                if (!autoReloadEnabled) return;
+                if (document.visibilityState !== 'visible') return;
+                autoReloadTimer = setInterval(() => {
+                    if (autoReloadEnabled && document.visibilityState === 'visible') {
+                        window.location.reload();
+                    }
+                }, AUTO_RELOAD_MS);
+            }
+
+            function syncAutoReloadButton() {
+                if (!autoReloadBtn) return;
+                autoReloadBtn.classList.toggle('active', autoReloadEnabled);
+                autoReloadBtn.setAttribute('aria-pressed', autoReloadEnabled ? 'true' : 'false');
+            }
+
+            syncAutoReloadButton();
+            scheduleAutoReload();
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'visible') {
+                    scheduleAutoReload();
+                } else {
+                    stopAutoReloadTimer();
+                }
+            });
+            if (autoReloadBtn) {
+                autoReloadBtn.addEventListener('click', () => {
+                    autoReloadEnabled = !autoReloadEnabled;
+                    writeStorage(STORAGE_AUTO_RELOAD, autoReloadEnabled ? 'true' : 'false');
+                    syncAutoReloadButton();
+                    scheduleAutoReload();
+                });
+            }
 
             if (!data || !data.reports || data.reports.length === 0) {
+                if (globalRangeEl) globalRangeEl.style.display = 'none';
                 emptyEl.style.display = 'block';
                 contentEl.style.display = 'none';
                 return;
+            }
+            const hasCharts = typeof Chart !== 'undefined';
+            if (globalRangeEl && !hasCharts) {
+                globalRangeEl.style.display = 'none';
             }
 
             emptyEl.style.display = 'none';
@@ -492,12 +907,12 @@
                 tr.innerHTML = `
                     <td><strong>${escapeHtml(title)}</strong></td>
                     <td>${escapeHtml(leftStr)}</td>
-                    <td>${rateStr}</td>
-                    <td>${safeStr}</td>
-                    <td>${atResetStr}</td>
+                    <td>${escapeHtml(rateStr)}</td>
+                    <td>${escapeHtml(safeStr)}</td>
+                    <td>${escapeHtml(atResetStr)}</td>
                     <td>${escapeHtml(resetsStr)}</td>
-                    <td>${statusStr}</td>
-                    <td>${lastSampleStr}</td>
+                    <td>${escapeHtml(statusStr)}</td>
+                    <td>${escapeHtml(lastSampleStr)}</td>
                 `;
                 tbody.appendChild(tr);
 
@@ -505,15 +920,20 @@
                 const badgeClass = isDis ? 'badge badge-disabled' : 'badge';
 
                 const isShort = rep.window_secs != null && rep.window_secs < 86400;
-                const rangeHtml = isDis ? '' : (isShort ? `
+                const rangeHtml = (!hasCharts || isDis) ? '' : (isShort ? `
                     <div class="range-toggle" role="group" aria-label="Time range" data-idx="${idx}">
+                        <button type="button" class="range-btn" data-range="window" aria-pressed="false">Window</button>
                         <button type="button" class="range-btn active" data-range="5h" aria-pressed="true">5h</button>
                         <button type="button" class="range-btn" data-range="24h" aria-pressed="false">24h</button>
                         <button type="button" class="range-btn" data-range="7d" aria-pressed="false">7d</button>
                         <button type="button" class="range-btn" data-range="30d" aria-pressed="false">30d</button>
+                        <button type="button" class="range-btn" data-range="all" aria-pressed="false">All</button>
                     </div>
                 ` : `
                     <div class="range-toggle" role="group" aria-label="Time range" data-idx="${idx}">
+                        <button type="button" class="range-btn" data-range="window" aria-pressed="false">Window</button>
+                        <button type="button" class="range-btn" data-range="5h" aria-pressed="false">5h</button>
+                        <button type="button" class="range-btn" data-range="24h" aria-pressed="false">24h</button>
                         <button type="button" class="range-btn active" data-range="7d" aria-pressed="true">7d</button>
                         <button type="button" class="range-btn" data-range="30d" aria-pressed="false">30d</button>
                         <button type="button" class="range-btn" data-range="all" aria-pressed="false">All</button>
@@ -536,26 +956,44 @@
 
                 const canvas = card.querySelector('canvas');
                 const datasets = [];
+                const themeColors = getThemeColors();
 
                 const nowMs = !isNaN(genDate.getTime()) ? genDate.getTime() : Date.now();
                 const resetMs = rep.reset_time ? new Date(rep.reset_time).getTime() : NaN;
                 const rawLastMs = p.last_sample ? new Date(p.last_sample).getTime() : NaN;
                 const lastSampleMs = !isNaN(rawLastMs) ? rawLastMs : nowMs;
-                const endMs = (!isNaN(resetMs) && resetMs > nowMs) ? resetMs : Math.max(nowMs, lastSampleMs);
-                const rawMin = endMs - (isShort ? 5 * 3600 * 1000 : 7 * 86400 * 1000);
-                const initialMin = Math.min(rawMin, lastSampleMs);
+                const endMs = Math.max(
+                    (!isNaN(resetMs) && resetMs > nowMs) ? resetMs : nowMs,
+                    lastSampleMs
+                );
+                const windowEndMs = !isNaN(resetMs) ? Math.max(resetMs, lastSampleMs) : lastSampleMs;
+                const windowStartMs = rep.window_start ? new Date(rep.window_start).getTime() : NaN;
+                const fallbackSpanMs = (rep.window_secs != null && rep.window_secs > 0)
+                    ? rep.window_secs * 1000
+                    : (isShort ? 5 * 3600 * 1000 : 7 * 86400 * 1000);
+                const initialRange = isShort ? '5h' : '7d';
+                const initialBounds = computeRangeBounds({
+                    isShort,
+                    endMs,
+                    windowEndMs,
+                    lastSampleMs,
+                    windowStartMs,
+                    fallbackSpanMs
+                }, initialRange);
+                const initialMin = initialBounds.minX;
+                const initialMax = initialBounds.maxX;
 
                 // Actual series
                 const allActualPts = (rep.series || []).map(pt => ({ x: pt[0], y: pt[1] * 100 }));
                 const actualPointRadius = pts => (pts.length === 1 ? 2 : 0);
                 let actualDataset = null;
                 if (allActualPts.length > 0) {
-                    const initialActualPts = allActualPts.filter(pt => pt.x >= initialMin);
+                    const initialActualPts = sliceSeriesFrom(allActualPts, initialMin);
                     actualDataset = {
                         label: 'Actual',
                         data: initialActualPts,
-                        borderColor: '#38bdf8',
-                        backgroundColor: '#38bdf8',
+                        borderColor: themeColors.accent,
+                        backgroundColor: themeColors.accent,
                         borderWidth: 2,
                         borderJoinStyle: 'round',
                         borderCapStyle: 'round',
@@ -574,7 +1012,7 @@
                             { x: new Date(rep.window_start).getTime(), y: 100 },
                             { x: new Date(rep.reset_time).getTime(), y: 0 }
                         ],
-                        borderColor: '#64748b',
+                        borderColor: themeColors.budget,
                         borderWidth: 1.5,
                         borderDash: [4, 4],
                         pointRadius: 0,
@@ -594,7 +1032,7 @@
                         endY = (p.at_reset || 0) * 100;
                     }
                     if (endX > startX) {
-                        const projColor = p.status === 'WillRunOut' ? '#ef4444' : (p.status === 'Tight' ? '#f59e0b' : '#10b981');
+                        const projColor = p.status === 'WillRunOut' ? themeColors.danger : (p.status === 'Tight' ? themeColors.warning : themeColors.success);
                         datasets.push({
                             label: 'Projection',
                             data: [
@@ -620,6 +1058,7 @@
                     box.style.border = '1px dashed var(--border)';
                     box.style.borderRadius = '6px';
                     box.innerHTML = '<strong style="color:var(--text);font-size:1.05rem;margin-bottom:0.25rem;">Disabled</strong><span>Weekly limit reached</span>';
+                    cardStates[idx] = null;
                 } else if (typeof Chart !== 'undefined') {
                     const chart = new Chart(canvas, {
                         type: 'line',
@@ -634,16 +1073,16 @@
                                     type: 'time',
                                     time: chartTimeOptions(),
                                     min: initialMin,
-                                    max: endMs,
-                                    grid: { color: 'rgba(255, 255, 255, 0.05)' },
-                                    ticks: { color: '#94a3b8' }
+                                    max: initialMax,
+                                    grid: { color: themeColors.grid },
+                                    ticks: { color: themeColors.tick }
                                 },
                                 y: {
                                     min: 0,
                                     max: 100,
-                                    grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                                    grid: { color: themeColors.grid },
                                     ticks: {
-                                        color: '#94a3b8',
+                                        color: themeColors.tick,
                                         callback: v => v + '%'
                                     }
                                 }
@@ -654,6 +1093,11 @@
                                     algorithm: 'min-max',
                                 },
                                 tooltip: {
+                                    backgroundColor: themeColors.tooltipBg,
+                                    titleColor: themeColors.tooltipText,
+                                    bodyColor: themeColors.tooltipText,
+                                    borderColor: themeColors.tooltipBorder,
+                                    borderWidth: 1,
                                     callbacks: {
                                         label: (ctx) => {
                                             const label = ctx.dataset.label ? `${ctx.dataset.label}: ` : '';
@@ -662,7 +1106,7 @@
                                     }
                                 },
                                 legend: {
-                                    labels: { color: '#94a3b8', boxWidth: 12 }
+                                    labels: { color: themeColors.tick, boxWidth: 12 }
                                 },
                                 boundaries: {
                                     display: true,
@@ -674,68 +1118,31 @@
                             }
                         }
                     });
+                    chart.$prognosisStatus = p.status;
                     chartInstances.push(chart);
 
                     const toggleContainer = card.querySelector('.range-toggle');
+                    cardStates[idx] = {
+                        chart,
+                        isShort,
+                        endMs,
+                        windowEndMs,
+                        lastSampleMs,
+                        windowStartMs,
+                        fallbackSpanMs,
+                        allActualPts,
+                        actualDataset,
+                        actualPointRadius,
+                        toggleContainer,
+                        currentRange: isShort ? '5h' : '7d'
+                    };
+
                     if (toggleContainer) {
                         toggleContainer.addEventListener('click', (e) => {
                             const btn = e.target.closest('.range-btn');
                             if (!btn || btn.classList.contains('active')) return;
-
-                            const range = btn.dataset.range;
-                            let handled = true;
-
-                            if (range === '5h') {
-                                chart.options.scales.x.min = Math.min(endMs - 5 * 3600 * 1000, lastSampleMs);
-                                chart.options.scales.x.max = endMs;
-                                if (isShort) chart.options.plugins.boundaries.display = true;
-                            } else if (range === '24h') {
-                                chart.options.scales.x.min = Math.min(endMs - 24 * 3600 * 1000, lastSampleMs);
-                                chart.options.scales.x.max = endMs;
-                                if (isShort) chart.options.plugins.boundaries.display = true;
-                            } else if (range === '7d') {
-                                chart.options.scales.x.min = Math.min(endMs - 7 * 86400 * 1000, lastSampleMs);
-                                chart.options.scales.x.max = endMs;
-                                chart.options.plugins.boundaries.display = !isShort;
-                            } else if (range === '30d') {
-                                chart.options.scales.x.min = Math.min(endMs - 30 * 86400 * 1000, lastSampleMs);
-                                chart.options.scales.x.max = endMs;
-                                chart.options.plugins.boundaries.display = !isShort;
-                            } else if (range === 'all') {
-                                delete chart.options.scales.x.min;
-                                chart.options.scales.x.max = endMs;
-                                chart.options.plugins.boundaries.display = false;
-                            } else {
-                                handled = false;
-                            }
-
-                            if (handled) {
-                                if (actualDataset) {
-                                    const minX = chart.options.scales.x.min;
-                                    const visiblePts = minX != null
-                                        ? allActualPts.filter(pt => pt.x >= minX)
-                                        : allActualPts;
-                                    if (actualDataset._decimated) {
-                                        delete actualDataset._decimated;
-                                        delete actualDataset._data;
-                                        Object.defineProperty(actualDataset, 'data', {
-                                            configurable: true,
-                                            enumerable: true,
-                                            writable: true,
-                                            value: visiblePts
-                                        });
-                                    } else {
-                                        actualDataset.data = visiblePts;
-                                    }
-                                    actualDataset.pointRadius = actualPointRadius(visiblePts);
-                                }
-                                toggleContainer.querySelectorAll('.range-btn').forEach(b => {
-                                    const isActive = b === btn;
-                                    b.classList.toggle('active', isActive);
-                                    b.setAttribute('aria-pressed', isActive ? 'true' : 'false');
-                                });
-                                clearSyncedCrosshair(null);
-                                chart.update('none');
+                            if (applyCardRange(idx, btn.dataset.range)) {
+                                syncGlobalRangeButtons();
                             }
                         });
                     }
@@ -749,8 +1156,31 @@
                     box.style.border = '1px dashed var(--border)';
                     box.style.borderRadius = '4px';
                     box.textContent = 'Charts unavailable offline (Chart.js CDN unreached)';
+                    cardStates[idx] = null;
                 }
             });
+
+            if (globalRangeEl) {
+                if (chartInstances.length === 0) {
+                    globalRangeEl.style.display = 'none';
+                } else {
+                    syncGlobalRangeButtons();
+                    globalRangeEl.addEventListener('click', (e) => {
+                        const btn = e.target.closest('.range-btn');
+                        if (!btn) return;
+                        const range = btn.dataset.range;
+                        let changed = false;
+                        cardStates.forEach((state, idx) => {
+                            if (state && state.chart && applyCardRange(idx, range)) {
+                                changed = true;
+                            }
+                        });
+                        if (changed) {
+                            syncGlobalRangeButtons();
+                        }
+                    });
+                }
+            }
 
             function updateRelativeTimes() {
                 const now = Date.now();

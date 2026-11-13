@@ -165,9 +165,11 @@ pub fn window_boundaries(samples: &[Sample]) -> Vec<usize> {
             None => false,
         };
         let disabled_changed = prev.disabled != curr.disabled;
-        if (reset_moved && (reset_expired || quota_increased))
-            || large_quota_jump
-            || disabled_changed
+        let both_untouched_full =
+            prev.remaining >= 0.995 && curr.remaining >= 0.995 && !prev.disabled && !curr.disabled;
+        if disabled_changed
+            || (!both_untouched_full
+                && ((reset_moved && (reset_expired || quota_increased)) || large_quota_jump))
         {
             boundaries.push(i);
         }
@@ -205,11 +207,7 @@ pub fn prognose(current: &[Sample], tight: f64) -> Prognosis {
                 safe_rate_per_h: None,
                 at_reset: None,
                 empty_at: None,
-                status: if last.disabled {
-                    Status::Disabled
-                } else {
-                    Status::Collecting
-                },
+                status: Status::Collecting,
             };
         }
     };
@@ -268,39 +266,61 @@ pub fn prognose(current: &[Sample], tight: f64) -> Prognosis {
         };
     }
 
-    // Least-squares slope with x = hours relative to t0
-    let n = rate_samples.len() as f64;
-    let mut sum_x = 0.0;
-    let mut sum_y = 0.0;
-    let points: Vec<(f64, f64)> = rate_samples
+    let tau_hours = lb_dur
+        .filter(|&lb| lb >= Duration::hours(6))
+        .map(|lb| (lb.num_milliseconds() as f64 / 3_600_000.0) / 4.0)
+        .filter(|&tau| tau > 0.0 && tau.is_finite());
+
+    let t_end = rate_samples.iter().map(|s| s.ts).max().unwrap_or(t0);
+
+    // Weighted least-squares slope with x = hours relative to t0.
+    // Long windows (lookback >= 6h) use exponential recency decay w_i = exp(-(t_end - t_i) / tau)
+    // with tau = lookback / 4; shorter/unknown windows use unweighted OLS (w_i = 1.0).
+    let mut sum_w = 0.0;
+    let mut sum_wx = 0.0;
+    let mut sum_wy = 0.0;
+    let points: Vec<(f64, f64, f64)> = rate_samples
         .iter()
         .map(|s| {
             let x = (s.ts - t0).num_milliseconds() as f64 / 3_600_000.0;
             let y = s.remaining;
-            sum_x += x;
-            sum_y += y;
-            (x, y)
+            let w = match tau_hours {
+                Some(tau) => {
+                    let dt_hours =
+                        ((t_end - s.ts).num_milliseconds() as f64 / 3_600_000.0).max(0.0);
+                    (-dt_hours / tau).exp()
+                }
+                None => 1.0,
+            };
+            sum_w += w;
+            sum_wx += w * x;
+            sum_wy += w * y;
+            (w, x, y)
         })
         .collect();
 
-    let mean_x = sum_x / n;
-    let mean_y = sum_y / n;
-    let mut numerator = 0.0;
-    let mut denominator = 0.0;
-    for (x, y) in points {
-        let dx = x - mean_x;
-        let dy = y - mean_y;
-        numerator += dx * dy;
-        denominator += dx * dx;
-    }
-
-    let slope = if denominator > 0.0 {
-        numerator / denominator
+    let slope = if sum_w > 0.0 && sum_w.is_finite() {
+        let mean_x = sum_wx / sum_w;
+        let mean_y = sum_wy / sum_w;
+        let mut numerator = 0.0;
+        let mut denominator = 0.0;
+        for (w, x, y) in points {
+            let dx = x - mean_x;
+            let dy = y - mean_y;
+            numerator += w * dx * dy;
+            denominator += w * dx * dx;
+        }
+        if denominator > 0.0 && denominator.is_finite() && numerator.is_finite() {
+            let s = numerator / denominator;
+            if s.is_finite() { s } else { 0.0 }
+        } else {
+            0.0
+        }
     } else {
         0.0
     };
-    // Treat |slope| < 1e-6 as zero slope to prevent floating-point noise artifacts
-    let rate = if slope.abs() < 1e-6 {
+    // Treat |slope| < 1e-6 (or non-finite) as zero slope to prevent floating-point noise artifacts
+    let rate = if !slope.is_finite() || slope.abs() < 1e-6 {
         0.0
     } else {
         (-slope).max(0.0)
@@ -404,6 +424,38 @@ pub fn analyze_since(samples: Vec<Sample>, cutoff: DateTime<Utc>, tight: f64) ->
     reports
 }
 
+/// Extracts the lowercase quota-family stem from `bucket_id` relative to `window`
+/// (e.g. `("gemini-5h", "5h") -> Some("gemini")`, `("gemini-argon-weekly", "weekly") -> Some("gemini-argon")`,
+/// `("c-24h-exhausted", "24h") -> Some("c")`). Returns `None` when `bucket_id` does not
+/// carry `window` as a delimited token or has no non-empty family prefix, preventing
+/// unrelated families in the same group from orphaning one another.
+fn bucket_family(bucket_id: &str, window: &str) -> Option<String> {
+    if bucket_id.is_empty() || window.is_empty() {
+        return None;
+    }
+    let id_lower = bucket_id.to_ascii_lowercase();
+    let win_lower = window.to_ascii_lowercase();
+    let bytes = id_lower.as_bytes();
+
+    for (idx, _) in id_lower.rmatch_indices(&win_lower) {
+        if idx < 2 {
+            continue;
+        }
+        let prev = bytes[idx - 1];
+        if prev != b'-' && prev != b'_' {
+            continue;
+        }
+        let after = idx + win_lower.len();
+        if after == bytes.len() || bytes[after] == b'-' || bytes[after] == b'_' {
+            let prefix = &id_lower[..idx - 1];
+            if !prefix.is_empty() {
+                return Some(prefix.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Analyzes borrowed samples. Clones every sample; prefer [`analyze_owned`] when the
 /// caller does not need to keep `samples`.
 pub fn analyze(samples: &[Sample], tight: f64) -> Vec<BucketReport> {
@@ -433,21 +485,28 @@ pub fn analyze_owned(samples: Vec<Sample>, tight: f64) -> Vec<BucketReport> {
         }
     }
 
-    // Groups whose weekly quota is exhausted in the latest batch (used to detect
-    // 5h buckets that stopped being reported because the weekly limit was reached).
-    let mut weekly_exhausted_groups: Vec<&str> = Vec::new();
+    // Track the longest enabled exhausted window per (group, family) in the latest batch
+    // (used to detect shorter-window siblings of the same quota family that stopped being
+    // reported because a longer-window limit was reached).
+    let mut exhausted_max_window: Vec<(String, String, Duration)> = Vec::new();
     for s in samples.iter().filter(|s| s.ts == latest_ts) {
-        if s.window == "weekly"
+        if !s.disabled
             && s.remaining <= 0.005
-            && !weekly_exhausted_groups.contains(&s.group.as_str())
+            && let Some(dur) = window_length(&s.window)
+            && let Some(family) = bucket_family(&s.bucket_id, &s.window)
         {
-            weekly_exhausted_groups.push(&s.group);
+            if let Some((_, _, max_dur)) = exhausted_max_window
+                .iter_mut()
+                .find(|(g, f, _)| *g == s.group && *f == family)
+            {
+                if dur > *max_dur {
+                    *max_dur = dur;
+                }
+            } else {
+                exhausted_max_window.push((s.group.clone(), family, dur));
+            }
         }
     }
-    let weekly_exhausted_groups: Vec<String> = weekly_exhausted_groups
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
 
     // Group samples by (group, bucket_id). There are only a handful of buckets, so a
     // linear scan over borrowed keys avoids allocating a lookup key per sample.
@@ -477,16 +536,21 @@ pub fn analyze_owned(samples: Vec<Sample>, tight: f64) -> Vec<BucketReport> {
         let candidate = &history[last_boundary..];
         let last = history.last().unwrap();
 
-        // Detect if a 5h bucket was skipped in collection because weekly limit was reached.
-        let is_orphaned_by_weekly_limit =
-            if last.window == "5h" && !last.disabled && last.ts < latest_ts {
-                weekly_exhausted_groups.contains(&group)
-            } else {
-                false
-            };
-
         let l_dur = window_length(&last.window);
-        let window_start = if last.disabled || is_orphaned_by_weekly_limit {
+        // Detect if an enabled shorter-window bucket was skipped in collection because
+        // an enabled longer-window sibling of the same quota family was exhausted.
+        let is_orphaned_by_longer_limit = !last.disabled
+            && last.ts < latest_ts
+            && l_dur.is_some_and(|dur| {
+                bucket_family(&bucket_id, &last.window).is_some_and(|family| {
+                    exhausted_max_window
+                        .iter()
+                        .find(|(g, f, _)| *g == group && *f == family)
+                        .is_some_and(|(_, _, max_dur)| *max_dur > dur)
+                })
+            });
+
+        let window_start = if last.disabled || is_orphaned_by_longer_limit {
             None
         } else {
             last.reset_time.and_then(|rt| l_dur.map(|dur| rt - dur))
@@ -497,11 +561,41 @@ pub fn analyze_owned(samples: Vec<Sample>, tight: f64) -> Vec<BucketReport> {
         } else {
             candidate.to_vec()
         };
+
+        // Untouched 100% rolling-reset buckets slide `reset_time` forward on each poll,
+        // leaving `window_start` at `last.ts` with < 15m in `current`. Fall back to the
+        // trailing `>= 0.995` plateau bounded to one window length so status evaluates cleanly.
+        let current_span_sufficient = current.len() >= 2
+            && (current.last().unwrap().ts - current.first().unwrap().ts) >= Duration::minutes(15);
+        let all_plateau_high = current.iter().all(|s| !s.disabled && s.remaining >= 0.995);
+        let not_declining_from_start = current
+            .first()
+            .is_none_or(|first| last.remaining >= first.remaining - 1e-6);
+        if !last.disabled
+            && !is_orphaned_by_longer_limit
+            && last.remaining >= 0.995
+            && !current_span_sufficient
+            && all_plateau_high
+            && not_declining_from_start
+        {
+            let plateau_cutoff = l_dur.and_then(|dur| last.ts.checked_sub_signed(dur));
+            let plateau_start = candidate
+                .iter()
+                .rposition(|s| {
+                    s.disabled || s.remaining < 0.995 || plateau_cutoff.is_some_and(|c| s.ts < c)
+                })
+                .map_or(0, |idx| idx + 1);
+            let plateau = &candidate[plateau_start..];
+            if plateau.len() > current.len() {
+                current = plateau.to_vec();
+            }
+        }
+
         if current.is_empty() {
             current.push(last.clone());
         }
 
-        let prognosis = if is_orphaned_by_weekly_limit {
+        let prognosis = if is_orphaned_by_longer_limit {
             let mut orphaned_last = last.clone();
             orphaned_last.disabled = true;
             orphaned_last.ts = latest_ts;
@@ -1692,6 +1786,362 @@ mod tests {
         assert_eq!(
             got,
             vec![0.45, 0.41, 0.41, 0.38, 1.00, 0.95, 0.95, 0.10, 0.90]
+        );
+    }
+
+    #[test]
+    fn untouched_full_rolling_reset_suppresses_sleep_boundary_and_evaluates_on_track() {
+        let t0 = base_time();
+        let mk = |min_offset: i64, remaining: f64, reset_offset_min: i64, disabled: bool| Sample {
+            ts: t0 + Duration::minutes(min_offset),
+            group: "Gemini Models".to_string(),
+            bucket_id: "gemini-5h".to_string(),
+            window: "5h".to_string(),
+            remaining,
+            reset_time: Some(t0 + Duration::minutes(min_offset + reset_offset_min)),
+            disabled,
+        };
+
+        // Untouched 100% bucket with rolling reset across a 6.5h sleep gap that crosses
+        // prev.reset_time (300m < 390m), followed by normal 15m polls at 100%.
+        let samples = vec![
+            mk(0, 1.0, 300, false),
+            mk(15, 1.0, 300, false),
+            // Laptop slept 6.5h across reset_time; still 1.0 on wake.
+            mk(390, 1.0, 300, false),
+            mk(405, 1.0, 300, false),
+            mk(420, 1.0, 300, false),
+            mk(435, 1.0, 300, false),
+        ];
+        assert!(
+            window_boundaries(&samples).is_empty(),
+            "sleep/gap across reset_time while untouched >= 0.995 must not create a boundary"
+        );
+        // Near-full (>= 0.995) across sleep/expiry also suppresses false reset boundaries.
+        assert!(
+            window_boundaries(&[mk(0, 0.996, 300, false), mk(390, 1.0, 300, false)]).is_empty()
+        );
+
+        let reports = analyze(&samples, 0.10);
+        assert_eq!(reports.len(), 1);
+        let rep = &reports[0];
+        assert!(rep.boundaries.is_empty());
+        assert_eq!(rep.prognosis.status, Status::OnTrack);
+        assert_eq!(rep.prognosis.rate_per_h, Some(0.0));
+        assert_eq!(rep.prognosis.at_reset, Some(1.0));
+        assert_eq!(rep.prognosis.empty_at, None);
+
+        // Negative boundary 1: rolling-reset 100% samples spanning < 15m stay Collecting.
+        let short_rolling = vec![mk(0, 1.0, 300, false), mk(10, 1.0, 300, false)];
+        let short_rep = analyze(&short_rolling, 0.10);
+        assert_eq!(short_rep[0].prognosis.status, Status::Collecting);
+
+        // Negative boundary 2: sleep across expiry from < 0.995 (0.98 -> 1.0) IS a real boundary.
+        let real_reset = vec![mk(0, 0.98, 300, false), mk(390, 1.0, 300, false)];
+        assert_eq!(window_boundaries(&real_reset), vec![1]);
+
+        // Negative boundary 3: disabled flip at 100% (true -> false) IS a boundary.
+        let disabled_flip = vec![mk(0, 1.0, 300, true), mk(390, 1.0, 300, false)];
+        assert_eq!(window_boundaries(&disabled_flip), vec![1]);
+    }
+
+    #[test]
+    fn untouched_full_plateau_prunes_ancient_samples_for_bounded_equivalence() {
+        let now = base_time();
+        let start = now - Duration::days(60);
+        let mut full = Vec::new();
+        let mut ts = start;
+        while ts <= now {
+            for (id, win, dur) in [
+                ("g-5h", "5h", Duration::hours(5)),
+                ("g-weekly", "weekly", Duration::days(7)),
+            ] {
+                full.push(Sample {
+                    ts,
+                    group: "G".to_string(),
+                    bucket_id: id.to_string(),
+                    window: win.to_string(),
+                    remaining: 1.0,
+                    reset_time: Some(ts + dur),
+                    disabled: false,
+                });
+            }
+            ts += Duration::minutes(15);
+        }
+
+        let cutoff = analysis_cutoff(now, 30);
+        let bounded: Vec<Sample> = full.iter().filter(|s| s.ts >= cutoff).cloned().collect();
+        assert!(bounded.len() < full.len());
+
+        let full_reports = analyze(&full, 0.10);
+        let bounded_reports = analyze_since(bounded, cutoff, 0.10);
+        assert_eq!(full_reports.len(), 2);
+        assert_eq!(bounded_reports.len(), 2);
+
+        for (f, b) in full_reports.iter().zip(&bounded_reports) {
+            assert_eq!(f.bucket_id, b.bucket_id);
+            assert_eq!(f.window_start, b.window_start);
+            assert_eq!(f.current, b.current, "{}", f.bucket_id);
+            assert_eq!(f.prognosis, b.prognosis, "{}", f.bucket_id);
+            assert_eq!(f.prognosis.status, Status::OnTrack);
+            assert_eq!(f.prognosis.rate_per_h, Some(0.0));
+            assert_eq!(f.prognosis.at_reset, Some(1.0));
+            assert_eq!(f.prognosis.empty_at, None);
+            assert!(f.boundaries.is_empty());
+
+            let win_len = window_length(&f.window).unwrap();
+            assert!(
+                f.current.iter().all(|s| s.ts >= now - win_len),
+                "{} current must prune ancient 100% plateau samples older than 1 window",
+                f.bucket_id
+            );
+        }
+    }
+
+    #[test]
+    fn ewls_long_window_weights_recency_and_preserves_linear_slope() {
+        let t0 = base_time();
+        let reset_w = t0 + Duration::days(5);
+        let mk_weekly = |hour_offset: i64, remaining: f64| Sample {
+            ts: t0 + Duration::hours(hour_offset),
+            group: "Gemini Models".to_string(),
+            bucket_id: "gemini-weekly".to_string(),
+            window: "weekly".to_string(),
+            remaining,
+            reset_time: Some(reset_w),
+            disabled: false,
+        };
+
+        // 1. Two-regime weekly trajectory: flat at 0.90 for [-24h..-6h], then burning 0.04/h in [-6h..0h].
+        let mut two_regime = Vec::new();
+        for h in -24..=0 {
+            let rem = if h <= -6 {
+                0.90
+            } else {
+                0.90 - 0.04 * ((h + 6) as f64)
+            };
+            two_regime.push(mk_weekly(h, rem));
+        }
+        let p_two = prognose(&two_regime, 0.10);
+        let ewls_rate = p_two.rate_per_h.unwrap();
+        // Verify exact EWLS formula (tau = 24h / 4 = 6h)
+        let tau = 6.0_f64;
+        let mut sw = 0.0;
+        let mut swx = 0.0;
+        let mut swy = 0.0;
+        for sample in &two_regime {
+            let x = (sample.ts - t0).num_milliseconds() as f64 / 3_600_000.0;
+            let w = (x / tau).exp();
+            sw += w;
+            swx += w * x;
+            swy += w * sample.remaining;
+        }
+        let mx = swx / sw;
+        let my = swy / sw;
+        let (num, den) = two_regime.iter().fold((0.0, 0.0), |(n, d), sample| {
+            let x = (sample.ts - t0).num_milliseconds() as f64 / 3_600_000.0;
+            let w = (x / tau).exp();
+            (
+                n + w * (x - mx) * (sample.remaining - my),
+                d + w * (x - mx).powi(2),
+            )
+        });
+        let expected_ewls_rate = -(num / den);
+        assert!((ewls_rate - expected_ewls_rate).abs() < 1e-12);
+        // Compare against unweighted OLS over the same 24h lookback: EWLS weighs recent
+        // acceleration much more heavily than unweighted OLS.
+        let n = two_regime.len() as f64;
+        let umx = two_regime
+            .iter()
+            .map(|s| (s.ts - t0).num_milliseconds() as f64 / 3_600_000.0)
+            .sum::<f64>()
+            / n;
+        let umy = two_regime.iter().map(|s| s.remaining).sum::<f64>() / n;
+        let (unum, uden) = two_regime.iter().fold((0.0, 0.0), |(nu, de), sample| {
+            let x = (sample.ts - t0).num_milliseconds() as f64 / 3_600_000.0;
+            (
+                nu + (x - umx) * (sample.remaining - umy),
+                de + (x - umx).powi(2),
+            )
+        });
+        let unweighted_rate = -(unum / uden);
+        assert!(
+            ewls_rate > unweighted_rate * 1.5,
+            "expected EWLS rate ({ewls_rate}) to substantially exceed unweighted OLS ({unweighted_rate})"
+        );
+
+        // 2. Exact constant-rate linear trajectory on weekly preserves exact slope.
+        let linear: Vec<Sample> = (-24..=0)
+            .map(|h| mk_weekly(h, 0.90 - 0.01 * ((h + 24) as f64)))
+            .collect();
+        let p_linear = prognose(&linear, 0.10);
+        assert!((p_linear.rate_per_h.unwrap() - 0.01).abs() < 1e-12);
+
+        // 3. Negative boundary: 5h window (lookback = 1h < 6h) stays unweighted OLS.
+        let short_two_regime = vec![
+            s(-60, 0.90, None),
+            s(-45, 0.90, None),
+            s(-30, 0.90, None),
+            s(-15, 0.90, None),
+            s(0, 0.50, None),
+        ];
+        let p_short = prognose(&short_two_regime, 0.10);
+        assert!(
+            (p_short.rate_per_h.unwrap() - 0.32).abs() < 1e-12,
+            "5h bucket must use unweighted OLS (0.32/h), got {:?}",
+            p_short.rate_per_h
+        );
+
+        // 4. Zero-variance / non-finite safety without NaN/Inf.
+        let flat_weekly: Vec<Sample> = (-24..=0).map(|h| mk_weekly(h, 0.50)).collect();
+        let p_flat = prognose(&flat_weekly, 0.10);
+        assert_eq!(p_flat.rate_per_h, Some(0.0));
+        assert_eq!(p_flat.status, Status::OnTrack);
+
+        let mut nan_history = vec![
+            mk_weekly(-24, f64::NAN),
+            mk_weekly(-12, 0.80),
+            mk_weekly(0, 0.80),
+        ];
+        let p_nan = prognose(&nan_history, 0.10);
+        assert_eq!(p_nan.rate_per_h, Some(0.0));
+        assert!(p_nan.at_reset.unwrap().is_finite());
+
+        // Single-timestamp edge case inside rate_samples via unsorted input: no NaN/Inf.
+        nan_history = vec![mk_weekly(0, 0.80), mk_weekly(0, 0.70)];
+        let p_same_ts = prognose(&nan_history, 0.10);
+        assert_eq!(p_same_ts.status, Status::Collecting);
+    }
+
+    #[test]
+    fn orphan_detection_generalizes_to_arbitrary_window_lengths() {
+        let t_old = base_time() - Duration::hours(3);
+        let t_latest = base_time();
+        let mk = |ts, group: &str, id: &str, window: &str, rem, disabled| Sample {
+            ts,
+            group: group.to_string(),
+            bucket_id: id.to_string(),
+            window: window.to_string(),
+            remaining: rem,
+            reset_time: if disabled {
+                None
+            } else {
+                Some(ts + Duration::hours(24))
+            },
+            disabled,
+        };
+
+        let samples = vec![
+            // Group "Custom": 24h is exhausted at t_latest -> should orphan stale "1h" sibling,
+            // but NOT stale same-length "24h" sibling, longer "7d" sibling, or unknown "monthly" sibling.
+            mk(t_old, "Custom", "c-1h", "1h", 0.75, false),
+            mk(t_old, "Custom", "c-24h-stale", "24h", 0.50, false),
+            mk(t_old, "Custom", "c-7d", "7d", 0.80, false),
+            mk(t_old, "Custom", "c-monthly", "monthly", 0.60, false),
+            mk(t_latest, "Custom", "c-24h-exhausted", "24h", 0.0, false),
+            // Group "DisabledParent": exhausted disabled sibling must NOT orphan shorter enabled sibling.
+            mk(t_old, "DisabledParent", "dp-1h", "1h", 0.85, false),
+            mk(t_latest, "DisabledParent", "dp-24h-dis", "24h", 0.0, true),
+        ];
+
+        let reports = analyze(&samples, 0.10);
+        let find = |id: &str| reports.iter().find(|r| r.bucket_id == id).unwrap();
+
+        let rep_1h = find("c-1h");
+        assert_eq!(rep_1h.prognosis.status, Status::Disabled);
+        assert_eq!(rep_1h.window_start, None);
+        assert_eq!(rep_1h.prognosis.last_sample, t_latest);
+
+        assert_ne!(find("c-24h-stale").prognosis.status, Status::Disabled);
+        assert_ne!(find("c-7d").prognosis.status, Status::Disabled);
+        assert_ne!(find("c-monthly").prognosis.status, Status::Disabled);
+        assert_ne!(find("dp-1h").prognosis.status, Status::Disabled);
+    }
+
+    #[test]
+    fn declining_short_new_window_does_not_absorb_prior_100_plateau() {
+        let t0 = base_time();
+        let reset_prev = t0;
+        let reset_curr = t0 + Duration::hours(5);
+        let mk = |ts, rem, rt| Sample {
+            ts,
+            group: "Gemini Models".to_string(),
+            bucket_id: "gemini-5h".to_string(),
+            window: "5h".to_string(),
+            remaining: rem,
+            reset_time: Some(rt),
+            disabled: false,
+        };
+
+        // Pre-window 100% plateau spanning 12h, then a fresh window starts at t0
+        // and immediately declines slightly while remaining >= 0.995 across <15m.
+        let mut samples = vec![
+            mk(t0 - Duration::hours(12), 1.0, reset_prev),
+            mk(t0 - Duration::hours(6), 1.0, reset_prev),
+            mk(t0 - Duration::minutes(15), 1.0, reset_prev),
+            mk(t0, 0.998, reset_curr),
+            mk(t0 + Duration::minutes(5), 0.996, reset_curr),
+        ];
+
+        let rep_declining = &analyze(&samples, 0.10)[0];
+        assert_eq!(
+            rep_declining.current.len(),
+            2,
+            "declining new window must not pull pre-window 1.0 samples into current"
+        );
+        assert_eq!(rep_declining.prognosis.status, Status::Collecting);
+
+        // Negative boundary: untouched 100% plateau still collapses to Status::OnTrack.
+        samples[3].remaining = 1.0;
+        samples[4].remaining = 1.0;
+        let rep_plateau = &analyze(&samples, 0.10)[0];
+        assert_eq!(rep_plateau.prognosis.status, Status::OnTrack);
+    }
+
+    #[test]
+    fn exhausted_bucket_does_not_orphan_unrelated_family_in_same_group() {
+        let t_old = base_time() - Duration::hours(4);
+        let t_latest = base_time();
+        let mk = |ts, id: &str, window: &str, rem| Sample {
+            ts,
+            group: "Gemini Models".to_string(),
+            bucket_id: id.to_string(),
+            window: window.to_string(),
+            remaining: rem,
+            reset_time: Some(ts + Duration::hours(24)),
+            disabled: false,
+        };
+
+        let samples = vec![
+            mk(t_old, "argon-5h", "5h", 0.65),
+            mk(t_old, "gemini-5h", "5h", 0.80),
+            mk(t_latest, "gemini-weekly", "weekly", 0.0),
+        ];
+        let reports = analyze(&samples, 0.10);
+        let find = |id: &str| reports.iter().find(|r| r.bucket_id == id).unwrap();
+
+        assert_eq!(find("gemini-5h").prognosis.status, Status::Disabled);
+        assert_ne!(
+            find("argon-5h").prognosis.status,
+            Status::Disabled,
+            "exhausted gemini-weekly must not orphan unrelated argon-5h in the same group"
+        );
+
+        // Similarly, gemini-argon-weekly must not orphan gemini-5h.
+        let samples_nested = vec![
+            mk(t_old, "gemini-5h", "5h", 0.80),
+            mk(t_latest, "gemini-argon-weekly", "weekly", 0.0),
+        ];
+        let reports_nested = analyze(&samples_nested, 0.10);
+        assert_ne!(
+            reports_nested
+                .iter()
+                .find(|r| r.bucket_id == "gemini-5h")
+                .unwrap()
+                .prognosis
+                .status,
+            Status::Disabled,
+            "exhausted gemini-argon-weekly must not orphan gemini-5h"
         );
     }
 }

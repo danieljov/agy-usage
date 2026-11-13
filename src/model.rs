@@ -1,6 +1,27 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Minutes after which the latest sample is considered stale across status, doctor, and TUI.
+pub const STALE_THRESHOLD_MINS: i64 = 15;
+
+/// Rounds `value` using scaling `factor` (`0.0` normalized cleanly for JSON/UI output).
+pub fn round_decimals(value: f64, factor: f64) -> f64 {
+    if !value.is_finite() || !factor.is_finite() || factor <= 0.0 {
+        return 0.0;
+    }
+    let scaled = (value * factor).round();
+    if !scaled.is_finite() {
+        return value;
+    }
+    let rounded = scaled / factor;
+    if rounded == 0.0 { 0.0 } else { rounded }
+}
+
+/// Rounds `value` to 4 decimal places (`0.0` normalized cleanly for JSON/UI output).
+pub fn round4(value: f64) -> f64 {
+    round_decimals(value, 10_000.0)
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Sample {
     pub ts: DateTime<Utc>,
@@ -48,6 +69,25 @@ pub fn format_window(win: &str) -> std::borrow::Cow<'_, str> {
         "5h" => "5h".into(),
         other => other.into(),
     }
+}
+
+/// Validates and normalizes `--tight-threshold` into a finite fraction in `0.0..=1.0`.
+/// Normalizes `-0.0` to `0.0` so CLI formatting and unit files never emit `-0`.
+pub fn normalize_tight_threshold(v: f64) -> Result<f64, String> {
+    if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+        return Err(format!(
+            "--tight-threshold must be a finite fraction in 0.0..=1.0 (got {v})"
+        ));
+    }
+    Ok(if v == 0.0 { 0.0 } else { v })
+}
+
+/// Parses `--tight-threshold` from CLI input as a finite fraction in `0.0..=1.0`.
+pub fn parse_tight_threshold(raw: &str) -> Result<f64, String> {
+    let val = raw
+        .parse::<f64>()
+        .map_err(|e| format!("invalid --tight-threshold '{raw}': {e}"))?;
+    normalize_tight_threshold(val)
 }
 
 #[cfg(test)]
@@ -135,5 +175,26 @@ mod tests {
         let s: Sample = serde_json::from_str(json).unwrap();
         assert!(s.disabled);
         assert_eq!(s.reset_time, None);
+    }
+
+    #[test]
+    fn test_round_decimals_and_normalize_tight_threshold() {
+        assert_eq!(round_decimals(1e305, 10_000.0), 1e305);
+        assert_eq!(round_decimals(1.23, 0.0), 0.0);
+        assert_eq!(round_decimals(1.23, -10.0), 0.0);
+        assert_eq!(round_decimals(f64::NAN, 100.0), 0.0);
+        assert_eq!(round_decimals(f64::INFINITY, 100.0), 0.0);
+        let neg_zero_rounded = round_decimals(-0.00001, 10.0);
+        assert!(!neg_zero_rounded.is_sign_negative());
+
+        assert_eq!(normalize_tight_threshold(0.0), Ok(0.0));
+        let norm_neg_zero = normalize_tight_threshold(-0.0).unwrap();
+        assert!(!norm_neg_zero.is_sign_negative());
+        assert_eq!(normalize_tight_threshold(0.1), Ok(0.1));
+        assert_eq!(normalize_tight_threshold(1.0), Ok(1.0));
+        assert!(normalize_tight_threshold(-0.1).is_err());
+        assert!(normalize_tight_threshold(1.1).is_err());
+        assert!(normalize_tight_threshold(f64::NAN).is_err());
+        assert!(normalize_tight_threshold(f64::INFINITY).is_err());
     }
 }

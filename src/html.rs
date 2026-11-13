@@ -1,3 +1,6 @@
+use std::io::Write;
+use std::path::Path;
+
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 
@@ -8,6 +11,7 @@ const TEMPLATE: &str = include_str!("../assets/dashboard.html");
 const CHART_JS: &str = include_str!("../assets/vendor/chart.umd.min.js");
 const DATE_FNS_ADAPTER: &str =
     include_str!("../assets/vendor/chartjs-adapter-date-fns.bundle.min.js");
+const PLATEAU_HEARTBEAT_MS: i64 = 900_000;
 
 #[derive(Serialize)]
 struct CompactReport<'a> {
@@ -30,6 +34,68 @@ struct DashboardData<'a> {
     reports: Vec<CompactReport<'a>>,
 }
 
+/// Compresses a chronological `(timestamp_ms, remaining)` series for HTML
+/// embedding by rounding values to 4 decimal places and collapsing interior
+/// flat plateau points while preserving series endpoints, plateau boundary
+/// points before/after transitions, and a heartbeat point at least every 15
+/// minutes (`900_000` ms) along long plateaus.
+pub fn compress_series(points: &[(i64, f64)]) -> Vec<(i64, f64)> {
+    debug_assert!(points.is_sorted_by_key(|p| p.0));
+    if points.is_empty() {
+        return Vec::new();
+    }
+
+    let rounded: Vec<(i64, f64)> = points
+        .iter()
+        .map(|&(ts, val)| (ts, crate::model::round4(val)))
+        .collect();
+    if rounded.len() <= 2 {
+        return rounded;
+    }
+
+    let mut out = Vec::with_capacity(rounded.len());
+    out.push(rounded[0]);
+    let mut last_emitted_ts = rounded[0].0;
+
+    for i in 1..rounded.len() - 1 {
+        let (ts, val) = rounded[i];
+        let prev_val = rounded[i - 1].1;
+        let (next_ts, next_val) = rounded[i + 1];
+
+        let is_plateau_edge = val != prev_val || val != next_val;
+        let needs_heartbeat = next_ts.saturating_sub(last_emitted_ts) > PLATEAU_HEARTBEAT_MS;
+
+        if is_plateau_edge || needs_heartbeat {
+            out.push((ts, val));
+            last_emitted_ts = ts;
+        }
+    }
+
+    out.push(rounded[rounded.len() - 1]);
+    out
+}
+
+/// Atomically writes `html` to `path` by creating parent directories if needed,
+/// writing to a sibling temporary file in the same directory, and renaming it
+/// into place. Any temporary file is removed automatically if writing fails.
+pub fn write_atomic(path: &Path, html: &str) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let existing_perms = std::fs::metadata(path).ok().map(|m| m.permissions());
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(html.as_bytes())?;
+    temp.flush()?;
+    if let Some(perms) = existing_perms {
+        temp.as_file().set_permissions(perms)?;
+    }
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
 pub fn render(
     reports: &[BucketReport],
     generated_at: DateTime<Utc>,
@@ -42,12 +108,13 @@ pub fn render(
     let compact_reports: Vec<CompactReport> = reports
         .iter()
         .map(|r| {
-            let series = r
+            let raw_series: Vec<(i64, f64)> = r
                 .history
                 .iter()
                 .filter(|s| s.ts >= cutoff)
                 .map(|s| (s.ts.timestamp_millis(), s.remaining))
                 .collect();
+            let series = compress_series(&raw_series);
             CompactReport {
                 group: &r.group,
                 bucket_id: &r.bucket_id,
@@ -406,67 +473,89 @@ mod tests {
         assert!(output.contains("aria-pressed=\"false\""));
         assert!(output.contains("b.setAttribute('aria-pressed', isActive ? 'true' : 'false')"));
 
-        // Negative boundary: disabled buckets suppress range toggle controls
-        assert!(output.contains("const rangeHtml = isDis ? '' :"));
+        // Negative boundary: disabled buckets (and offline fallback without Chart.js) suppress range toggle controls
+        assert!(output.contains("const rangeHtml = (!hasCharts || isDis) ? '' :"));
 
         // Boundary plugin checks display property and chartArea existence
         assert!(output.contains("boundaries?.display === false"));
         assert!(output.contains("!chart.chartArea || !chart.scales?.x"));
 
-        // Consistent 5h viewport bounds with lastSampleMs clamp against clock skew
-        assert!(output.contains(
-            "chart.options.scales.x.min = Math.min(endMs - 5 * 3600 * 1000, lastSampleMs);"
-        ));
+        // Consistent 5h / fixed-range viewport bounds with lastSampleMs clamp and shared applyCardRange helper
+        assert!(output.contains("function applyCardRange(cardIdx, range)"));
+        assert!(output.contains("'5h': { spanMs: 5 * 3600 * 1000, boundaries: () => true }"));
+        assert!(output.contains("'24h': { spanMs: 24 * 3600 * 1000, boundaries: () => true }"));
+        assert!(
+            output.contains("'7d': { spanMs: 7 * 86400 * 1000, boundaries: isShort => !isShort }")
+        );
+        assert!(
+            output
+                .contains("'30d': { spanMs: 30 * 86400 * 1000, boundaries: isShort => !isShort }")
+        );
 
         // Boundary restoration on 7d/30d for non-short cards
         assert!(
             output.contains("const isShort = rep.window_secs != null && rep.window_secs < 86400;")
         );
-        assert!(output.contains("chart.options.plugins.boundaries.display = !isShort;"));
+        assert!(output.contains("function computeRangeBounds(state, range)"));
+        assert!(
+            output.contains("chart.options.plugins.boundaries.display = bounds.boundariesDisplay;")
+        );
 
-        // Window-aware defaults in chart initialization: initial viewport matches active button (5h for short, 7d for long)
+        // Window-aware defaults in chart initialization: initial viewport uses computeRangeBounds (matching 5h/7d toggle)
         assert!(output.contains("\"window_secs\":18000"));
         assert!(output.contains("\"window_secs\":86400"));
         assert!(output.contains("\"window_secs\":604800"));
-        assert!(
-            output
-                .contains("const rawMin = endMs - (isShort ? 5 * 3600 * 1000 : 7 * 86400 * 1000);")
-        );
+        assert!(output.contains("const initialBounds = computeRangeBounds({"));
+        assert!(output.contains("}, initialRange);"));
         assert!(!output.contains("const winMs ="));
-        assert!(output.contains("const initialMin = Math.min(rawMin, lastSampleMs);"));
+        assert!(output.contains("const initialMin = initialBounds.minX;"));
+        assert!(output.contains("const initialMax = initialBounds.maxX;"));
         assert!(
-            output.contains(
-                "const initialActualPts = allActualPts.filter(pt => pt.x >= initialMin);"
-            )
+            output.contains("const initialActualPts = sliceSeriesFrom(allActualPts, initialMin);")
         );
-        assert!(output.contains("allActualPts.filter(pt => pt.x >= minX)"));
+        assert!(output.contains("const visiblePts = sliceSeriesFrom(allActualPts, minX);"));
+        assert!(output.contains("updateDatasetPoints(actualDataset, visiblePts);"));
         assert!(output.contains("actualDataset.pointRadius = actualPointRadius(visiblePts);"));
         assert!(output.contains("min: initialMin"));
-        assert!(output.contains("max: endMs"));
+        assert!(output.contains("max: initialMax"));
         assert!(output.contains("chart.options.scales.x.min"));
         assert!(output.contains("chart.options.scales.x.max"));
         assert!(output.contains("chart.update('none')"));
 
-        // Template exclusivity: short template has 5h active default; long/weekly has 7d active default
+        // Unified card range buttons on every card with window-aware active defaults (5h for short, 7d for long/weekly)
         let (_, range_section) = output
-            .split_once("const rangeHtml = isDis ? '' : (isShort ? `")
+            .split_once("const rangeHtml = (!hasCharts || isDis) ? '' : (isShort ? `")
             .expect("rangeHtml section found");
         let (h_5h, h_weekly) = range_section
             .split_once("` : `")
             .expect("both template branches present");
+        let (h_weekly, _) = h_weekly
+            .split_once("`);")
+            .expect("end of rangeHtml template");
+        for range in ["window", "5h", "24h", "7d", "30d", "all"] {
+            let attr = format!("data-range=\"{range}\"");
+            assert!(h_5h.contains(&attr), "short card missing unified {attr}");
+            assert!(
+                h_weekly.contains(&attr),
+                "weekly card missing unified {attr}"
+            );
+        }
         assert!(h_5h.contains("class=\"range-btn active\" data-range=\"5h\""));
-        assert!(h_5h.contains("data-range=\"24h\""));
-        assert!(!h_5h.contains("class=\"range-btn active\" data-range=\"24h\""));
-        assert!(!h_5h.contains("class=\"range-btn active\" data-range=\"7d\""));
-        assert!(!h_5h.contains("class=\"range-btn active\" data-range=\"30d\""));
-        assert!(!h_5h.contains("data-range=\"all\""));
+        for other in ["window", "24h", "7d", "30d", "all"] {
+            let active_attr = format!("class=\"range-btn active\" data-range=\"{other}\"");
+            assert!(
+                !h_5h.contains(&active_attr),
+                "short card unexpectedly activated {other}"
+            );
+        }
         assert!(h_weekly.contains("class=\"range-btn active\" data-range=\"7d\""));
-        assert!(h_weekly.contains("data-range=\"30d\""));
-        assert!(!h_weekly.contains("class=\"range-btn active\" data-range=\"30d\""));
-        assert!(!h_weekly.contains("class=\"range-btn active\" data-range=\"all\""));
-        assert!(h_weekly.contains("data-range=\"all\""));
-        assert!(!h_weekly.contains("data-range=\"5h\""));
-        assert!(!h_weekly.contains("data-range=\"24h\""));
+        for other in ["window", "5h", "24h", "30d", "all"] {
+            let active_attr = format!("class=\"range-btn active\" data-range=\"{other}\"");
+            assert!(
+                !h_weekly.contains(&active_attr),
+                "weekly card unexpectedly activated {other}"
+            );
+        }
     }
 
     #[test]
@@ -744,5 +833,179 @@ mod tests {
 
         // Range toggle clears any active synced crosshair
         assert!(output.contains("clearSyncedCrosshair(null);"));
+    }
+
+    #[test]
+    fn compress_series_handles_empty_single_and_rounding() {
+        assert_eq!(compress_series(&[]), Vec::<(i64, f64)>::new());
+
+        let single = compress_series(&[(1_000, -0.00001)]);
+        assert_eq!(single, vec![(1_000, 0.0)]);
+        assert!(single[0].1.is_sign_positive());
+
+        let two = compress_series(&[(1_000, 0.12344), (2_000, 0.12345)]);
+        assert_eq!(two, vec![(1_000, 0.1234), (2_000, 0.1235)]);
+    }
+
+    #[test]
+    fn compress_series_preserves_plateau_edges_and_15m_heartbeats() {
+        // 45 minutes of 1-minute samples at 1.0 (with tiny rounding noise), followed by a ramp down.
+        let mut pts = Vec::new();
+        for m in 0..=45 {
+            let noise = if m % 2 == 0 { 0.00002 } else { -0.00002 };
+            pts.push((m * 60_000, 1.0 + noise));
+        }
+        pts.push((46 * 60_000, 0.85));
+        pts.push((47 * 60_000, 0.85));
+        pts.push((48 * 60_000, 0.85));
+        pts.push((49 * 60_000, 0.70));
+
+        let compressed = compress_series(&pts);
+        // Must preserve:
+        // - 0m (series start & plateau start)
+        // - 15m, 30m (15m heartbeats along long plateau)
+        // - 45m (final point of 1.0 plateau right before drop at 46m!)
+        // - 46m (drop & start of 0.85 plateau)
+        // - 48m (final point of 0.85 plateau right before drop at 49m!)
+        // - 49m (series end)
+        assert_eq!(
+            compressed,
+            vec![
+                (0, 1.0),
+                (15 * 60_000, 1.0),
+                (30 * 60_000, 1.0),
+                (45 * 60_000, 1.0),
+                (46 * 60_000, 0.85),
+                (48 * 60_000, 0.85),
+                (49 * 60_000, 0.7),
+            ]
+        );
+    }
+
+    #[test]
+    fn compress_series_keeps_gap_within_15m_for_4m_cadence() {
+        // 4-minute sampling cadence over 40 minutes on a flat plateau:
+        // heartbeat must ensure consecutive points stay <= 900_000 ms apart.
+        let pts: Vec<(i64, f64)> = (0..=10).map(|i| (i * 4 * 60_000, 0.9)).collect();
+        let compressed = compress_series(&pts);
+        assert_eq!(compressed.first().copied(), Some((0, 0.9)));
+        assert_eq!(compressed.last().copied(), Some((40 * 60_000, 0.9)));
+        assert!(compressed.len() < pts.len());
+        for w in compressed.windows(2) {
+            assert!(
+                w[1].0 - w[0].0 <= 900_000,
+                "gap {} exceeded 15m heartbeat",
+                w[1].0 - w[0].0
+            );
+        }
+    }
+
+    #[test]
+    fn render_embeds_compressed_series() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
+        let start = now - Duration::minutes(40);
+        let samples: Vec<Sample> = (0..=40)
+            .map(|m| Sample {
+                ts: start + Duration::minutes(m),
+                group: "Gemini".to_string(),
+                bucket_id: "gemini-5h".to_string(),
+                window: "5h".to_string(),
+                remaining: 1.0,
+                reset_time: Some(now + Duration::hours(4)),
+                disabled: false,
+            })
+            .collect();
+        let rep = make_report("Gemini", "gemini-5h", "5h", samples);
+        let html = render(&[rep], now, 30, ClockFormat::H24);
+        let val: serde_json::Value = serde_json::from_str(&extract_json(&html)).unwrap();
+        let series = val["reports"][0]["series"].as_array().unwrap();
+        assert_eq!(series.len(), 4); // 0m, 15m, 30m, 40m
+    }
+
+    #[test]
+    fn write_atomic_creates_parents_overwrites_and_cleans_up_on_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("nested").join("dir").join("dashboard.html");
+
+        write_atomic(&nested, "<html>v1</html>").unwrap();
+        assert_eq!(std::fs::read_to_string(&nested).unwrap(), "<html>v1</html>");
+        assert_eq!(
+            std::fs::read_dir(nested.parent().unwrap()).unwrap().count(),
+            1
+        );
+
+        // Clean overwrite
+        write_atomic(&nested, "<html>v2</html>").unwrap();
+        assert_eq!(std::fs::read_to_string(&nested).unwrap(), "<html>v2</html>");
+        assert_eq!(
+            std::fs::read_dir(nested.parent().unwrap()).unwrap().count(),
+            1
+        );
+
+        // Negative boundary: persisting over an existing directory fails and removes temp file
+        let err_dir = tmp.path().join("existing_dir");
+        std::fs::create_dir(&err_dir).unwrap();
+        assert!(write_atomic(&err_dir, "<html>fail</html>").is_err());
+        assert_eq!(std::fs::read_dir(&err_dir).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 2); // nested + existing_dir only
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o644)).unwrap();
+            write_atomic(&nested, "<html>v3</html>").unwrap();
+            let mode = std::fs::metadata(&nested).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o644,
+                "write_atomic should preserve existing file mode"
+            );
+        }
+    }
+
+    #[test]
+    fn dashboard_includes_global_range_auto_reload_theme_and_slice_helpers() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
+        let output = render(&[], now, 30, ClockFormat::H24);
+
+        // Demo/screenshot template invariants must stay intact
+        assert_eq!(
+            output.matches("<title>agy-usage dashboard</title>").count(),
+            1
+        );
+        assert_eq!(output.matches("<body>").count(), 1);
+        assert!(output.contains("const data = "));
+        assert!(output.contains("maintainAspectRatio: false,"));
+        assert!(output.contains("transition: color 0.15s ease, background 0.15s ease;"));
+
+        // Global range selector bar in header
+        assert!(output.contains("id=\"global-range-toggle\""));
+        assert!(output.contains("aria-label=\"Global time range\""));
+        assert!(output.contains("function syncGlobalRangeButtons()"));
+
+        // Left-edge interpolation & decimation cleanup
+        assert!(output.contains("function sliceSeriesFrom(pts, cutoffMs)"));
+        assert!(output.contains("function updateDatasetPoints(ds, nextPts)"));
+        assert!(output.contains("delete ds._decimated;"));
+        assert!(output.contains("delete ds._data;"));
+
+        // Opt-in Auto 60s reload control with visibilityState & try/catch localStorage persistence
+        assert!(output.contains("id=\"auto-reload-btn\""));
+        assert!(output.contains("Auto 60s"));
+        assert!(output.contains("document.visibilityState === 'visible'"));
+        assert!(output.contains("visibilitychange"));
+        assert!(output.contains("window.localStorage.getItem"));
+        assert!(output.contains("window.localStorage.setItem"));
+        assert!(output.contains("AUTO_RELOAD_MS = 60000"));
+
+        // Dark-default + light-mode theme toggle on documentElement + dynamic Chart.js colors
+        assert!(output.contains(":root {"));
+        assert!(output.contains("[data-theme=\"light\"]"));
+        assert!(output.contains("document.documentElement.setAttribute('data-theme', 'light')"));
+        assert!(output.contains("document.documentElement.removeAttribute('data-theme')"));
+        assert!(output.contains("id=\"theme-toggle-btn\""));
+        assert!(output.contains("function getThemeColors()"));
+        assert!(output.contains("getThemeColors().boundary"));
+        assert!(output.contains("getThemeColors().crosshair"));
+        assert!(output.contains("backgroundColor: themeColors.tooltipBg"));
     }
 }
