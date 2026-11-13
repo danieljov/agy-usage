@@ -12,7 +12,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::Marker;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Axis, Block, Borders, Cell, Chart, Clear, Dataset, GraphType, Paragraph, Row, Table,
+    Axis, Block, Borders, Cell, Chart, Clear, Dataset, GraphType, Paragraph, Row, Table, Wrap,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -79,6 +79,7 @@ pub struct ViewState {
     pub clock: ClockFormat,
     pub time_range: TimeRange,
     pub show_help: bool,
+    pub stale_threshold: Option<chrono::Duration>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -153,9 +154,13 @@ pub fn format_reset_cell(rep: &BucketReport, now: DateTime<Utc>, clock: ClockFor
 /// This is checked in debug builds only.
 pub fn chart_viewport(rep: &BucketReport, time_range: TimeRange) -> Option<ChartViewport> {
     debug_assert!(rep.history.is_sorted_by_key(|s| s.ts));
-    let reset_time = rep.prognosis.reset_time?;
+    if rep.prognosis.status == Status::Disabled || rep.history.is_empty() {
+        return None;
+    }
     let last_sample_ts = rep.prognosis.last_sample.timestamp() as f64;
-    let end_ts = (reset_time.timestamp() as f64).max(last_sample_ts);
+    let end_ts = rep.prognosis.reset_time.map_or(last_sample_ts, |rt| {
+        (rt.timestamp() as f64).max(last_sample_ts)
+    });
 
     let mut x_min = match time_range {
         TimeRange::Window => {
@@ -516,30 +521,32 @@ fn draw_chart(
         return;
     }
 
-    let reset_time = match rep.prognosis.reset_time {
-        Some(rt) => rt,
-        None => return,
-    };
     let viewport = match chart_viewport(rep, state.time_range) {
         Some(vp) => vp,
-        None => return,
+        None => {
+            let text = Paragraph::new("Collecting (no samples yet)")
+                .alignment(ratatui::layout::Alignment::Center)
+                .style(Style::default().fg(Color::DarkGray))
+                .block(Block::default().borders(Borders::ALL).title(title));
+            frame.render_widget(text, area);
+            return;
+        }
     };
 
-    let budget_pts: Vec<(f64, f64)> = if let Some(ws) = rep.window_start {
-        vec![
-            (ws.timestamp() as f64, 100.0),
-            (reset_time.timestamp() as f64, 0.0),
-        ]
-    } else {
-        Vec::new()
+    let budget_pts: Vec<(f64, f64)> = match (rep.window_start, rep.prognosis.reset_time) {
+        (Some(ws), Some(rt)) => vec![(ws.timestamp() as f64, 100.0), (rt.timestamp() as f64, 0.0)],
+        _ => Vec::new(),
     };
 
-    let proj_pts = projection_points(rep, reset_time);
+    let proj_pts = match rep.prognosis.reset_time {
+        Some(rt) => projection_points(rep, rt),
+        None => Vec::new(),
+    };
 
-    let reset_pts = vec![
-        (reset_time.timestamp() as f64, 0.0),
-        (reset_time.timestamp() as f64, 100.0),
-    ];
+    let reset_pts: Vec<(f64, f64)> = match rep.prognosis.reset_time {
+        Some(rt) => vec![(rt.timestamp() as f64, 0.0), (rt.timestamp() as f64, 100.0)],
+        None => Vec::new(),
+    };
 
     let boundary_segments: Vec<[(f64, f64); 2]> = viewport
         .boundary_xs
@@ -618,14 +625,16 @@ fn draw_chart(
                 .data(&proj_pts),
         );
     }
-    datasets.push(
-        Dataset::default()
-            .name("Reset")
-            .marker(Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(Color::White))
-            .data(&reset_pts),
-    );
+    if !reset_pts.is_empty() {
+        datasets.push(
+            Dataset::default()
+                .name("Reset")
+                .marker(Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(Color::White))
+                .data(&reset_pts),
+        );
+    }
 
     let chart = Chart::new(datasets)
         .block(Block::default().borders(Borders::ALL).title(title))
@@ -764,11 +773,15 @@ fn draw_status_bar(
     };
 
     let latest_sample = reports.iter().map(|r| r.prognosis.last_sample).max();
+    let stale_secs = state
+        .stale_threshold
+        .unwrap_or_else(|| chrono::Duration::minutes(crate::model::STALE_THRESHOLD_MINS))
+        .num_seconds();
     let (right_text, is_stale) = if let Some(ls) = latest_sample {
         let age_secs = (now - ls).num_seconds();
         (
             format!("last sample {}", format_time_ago(ls, now)),
-            age_secs > crate::model::STALE_THRESHOLD_MINS * 60,
+            age_secs > stale_secs,
         )
     } else {
         ("".to_string(), false)
@@ -992,7 +1005,12 @@ fn draw_help_modal(frame: &mut Frame, area: Rect) {
         ));
 
     frame.render_widget(Clear, modal_area);
-    frame.render_widget(Paragraph::new(lines).block(block), modal_area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block),
+        modal_area,
+    );
 }
 
 fn truncate_to_width(s: &str, max_width: usize) -> String {
@@ -1045,11 +1063,23 @@ pub fn render_plain(
     height: u16,
     clock: ClockFormat,
 ) -> String {
+    render_plain_with_threshold(reports, now, width, height, clock, None)
+}
+
+fn render_plain_with_threshold(
+    reports: &[BucketReport],
+    now: DateTime<Utc>,
+    width: u16,
+    height: u16,
+    clock: ClockFormat,
+    stale_threshold: Option<chrono::Duration>,
+) -> String {
     let backend = ratatui::backend::TestBackend::new(width, height);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
     let state = ViewState {
         is_once: true,
         clock,
+        stale_threshold,
         ..Default::default()
     };
     terminal
@@ -1122,11 +1152,23 @@ pub fn render_ansi(
     height: u16,
     clock: ClockFormat,
 ) -> String {
+    render_ansi_with_threshold(reports, now, width, height, clock, None)
+}
+
+fn render_ansi_with_threshold(
+    reports: &[BucketReport],
+    now: DateTime<Utc>,
+    width: u16,
+    height: u16,
+    clock: ClockFormat,
+    stale_threshold: Option<chrono::Duration>,
+) -> String {
     let backend = ratatui::backend::TestBackend::new(width, height);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
     let state = ViewState {
         is_once: true,
         clock,
+        stale_threshold,
         ..Default::default()
     };
     terminal
@@ -1222,11 +1264,20 @@ pub fn print_once(reports: &[BucketReport], now: DateTime<Utc>, clock: ClockForm
         None
     };
     let (w, h) = once_dimensions(reports.len(), term_size, is_tty);
+    let stale_threshold = Some(crate::timer::stale_threshold_for_interval(
+        crate::timer::installed_interval_minutes(),
+    ));
 
     if is_tty {
-        print!("{}", render_ansi(reports, now, w, h, clock));
+        print!(
+            "{}",
+            render_ansi_with_threshold(reports, now, w, h, clock, stale_threshold)
+        );
     } else {
-        println!("{}", render_plain(reports, now, w, h, clock));
+        println!(
+            "{}",
+            render_plain_with_threshold(reports, now, w, h, clock, stale_threshold)
+        );
     }
     Ok(())
 }
@@ -1371,7 +1422,7 @@ pub fn handle_key_event(
     }
 
     if state.show_help {
-        if matches!(code, KeyCode::Esc | KeyCode::Char('?')) {
+        if matches!(code, KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('0')) {
             state.show_help = false;
         }
         return KeyAction::None;
@@ -1432,26 +1483,37 @@ fn write_dashboard_html(
     history_days: u32,
     clock: ClockFormat,
 ) -> std::io::Result<PathBuf> {
-    let rendered = crate::html::render(reports, now, history_days, clock);
+    let cutoff = crate::forecast::analysis_cutoff(now, history_days);
+    let active: Vec<BucketReport> = reports
+        .iter()
+        .filter(|r| r.prognosis.last_sample >= cutoff)
+        .cloned()
+        .collect();
+    let rendered = crate::html::render(&active, now, history_days, clock);
     let html_path = data_dir.join("dashboard.html");
     crate::html::write_atomic(&html_path, &rendered)?;
     Ok(html_path)
 }
 
+fn safe_unix_open_path(target: &Path) -> OsString {
+    if target.is_relative() && target.to_string_lossy().starts_with('-') {
+        PathBuf::from(".").join(target).into_os_string()
+    } else {
+        target.as_os_str().to_os_string()
+    }
+}
+
 fn browser_open_command(os: &str, target: &Path) -> (&'static str, Vec<OsString>) {
-    let path_arg = target.as_os_str().to_os_string();
     match os {
-        "macos" => ("open", vec![path_arg]),
+        "macos" => ("open", vec![safe_unix_open_path(target)]),
         "windows" => (
-            "cmd",
+            "rundll32.exe",
             vec![
-                OsString::from("/C"),
-                OsString::from("start"),
-                OsString::from(""),
-                path_arg,
+                OsString::from("url.dll,FileProtocolHandler"),
+                target.as_os_str().to_os_string(),
             ],
         ),
-        _ => ("xdg-open", vec![path_arg]),
+        _ => ("xdg-open", vec![safe_unix_open_path(target)]),
     }
 }
 
@@ -1531,6 +1593,9 @@ pub fn run_with_history(
         let mut reports: Vec<BucketReport> = Vec::new();
         let mut state = ViewState {
             clock,
+            stale_threshold: Some(crate::timer::stale_threshold_for_interval(
+                crate::timer::installed_interval_minutes(),
+            )),
             ..Default::default()
         };
         let mut cursor = crate::store::Cursor::default();
@@ -3504,16 +3569,23 @@ mod tests {
             KeyCode::Char('k'),
             KeyCode::Up,
             KeyCode::BackTab,
-            KeyCode::Char('0'),
             KeyCode::Char('o'),
         ] {
             assert_eq!(
                 handle_key_event(&mut state, key, KeyModifiers::NONE, 3),
                 KeyAction::None
             );
+            assert!(state.show_help);
             assert_eq!(state.focus, Some(1));
             assert_eq!(state.time_range, saved_range);
         }
+        // Pressing '0' closes help without dropping the current focus
+        assert_eq!(
+            handle_key_event(&mut state, KeyCode::Char('0'), KeyModifiers::NONE, 3),
+            KeyAction::None
+        );
+        assert!(!state.show_help);
+        assert_eq!(state.focus, Some(1));
     }
 
     #[test]
@@ -3638,16 +3710,20 @@ mod tests {
         assert_eq!(args, vec![OsString::from(p)]);
 
         let (prog, args) = browser_open_command("windows", p);
-        assert_eq!(prog, "cmd");
+        assert_eq!(prog, "rundll32.exe");
         assert_eq!(
             args,
             vec![
-                OsString::from("/C"),
-                OsString::from("start"),
-                OsString::from(""),
+                OsString::from("url.dll,FileProtocolHandler"),
                 OsString::from(p),
             ]
         );
+
+        let leading_dash = Path::new("-dash.html");
+        let (_, linux_dash_args) = browser_open_command("linux", leading_dash);
+        assert_eq!(linux_dash_args, vec![OsString::from("./-dash.html")]);
+        let (_, mac_dash_args) = browser_open_command("macos", leading_dash);
+        assert_eq!(mac_dash_args, vec![OsString::from("./-dash.html")]);
 
         let (prog, args) = browser_open_command("freebsd", p);
         assert_eq!(prog, "xdg-open");
@@ -3699,5 +3775,98 @@ mod tests {
             &[OsString::from(html_file.as_os_str())],
         );
         assert!(spawn_err.is_err());
+    }
+
+    #[test]
+    fn non_disabled_collecting_bucket_without_reset_time_renders_chart_block_and_zero_closes_help()
+    {
+        let t0 = Utc.with_ymd_and_hms(2026, 10, 12, 10, 0, 0).unwrap();
+        let samples = vec![Sample {
+            ts: t0,
+            group: "Gemini Models".to_string(),
+            bucket_id: "gemini-5h".to_string(),
+            window: "5h".to_string(),
+            remaining: 0.72,
+            reset_time: None,
+            disabled: false,
+        }];
+        let reports = crate::forecast::analyze(&samples, 0.10);
+        assert_eq!(reports[0].prognosis.status, Status::Collecting);
+        assert_eq!(reports[0].prognosis.reset_time, None);
+
+        let vp = chart_viewport(&reports[0], TimeRange::Window).unwrap();
+        assert_eq!(vp.actual_pts.len(), 1);
+        let rendered = render_plain(
+            &reports,
+            t0 + chrono::Duration::minutes(2),
+            100,
+            24,
+            ClockFormat::H24,
+        );
+        assert!(
+            rendered.contains("Gemini Models · 5h"),
+            "expected bordered chart title in:\n{rendered}"
+        );
+        assert!(!rendered.contains("No samples yet"));
+
+        let mut state = ViewState {
+            show_help: true,
+            focus: Some(0),
+            ..Default::default()
+        };
+        let action = handle_key_event(&mut state, KeyCode::Char('0'), KeyModifiers::NONE, 1);
+        assert!(matches!(action, KeyAction::None));
+        assert!(!state.show_help);
+        assert_eq!(state.focus, Some(0));
+    }
+
+    #[test]
+    fn write_dashboard_html_filters_retired_buckets_and_honors_stale_threshold() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 20, 12, 0, 0).unwrap();
+        let active_ts = now - chrono::Duration::minutes(40);
+        let retired_ts = now - chrono::Duration::days(16);
+        let samples = vec![
+            Sample {
+                ts: retired_ts,
+                group: "Retired".to_string(),
+                bucket_id: "old-bucket".to_string(),
+                window: "5h".to_string(),
+                remaining: 0.5,
+                reset_time: Some(retired_ts + chrono::Duration::hours(5)),
+                disabled: false,
+            },
+            Sample {
+                ts: active_ts,
+                group: "Gemini Models".to_string(),
+                bucket_id: "active-bucket".to_string(),
+                window: "5h".to_string(),
+                remaining: 0.8,
+                reset_time: Some(now + chrono::Duration::hours(4)),
+                disabled: false,
+            },
+        ];
+        let reports = crate::forecast::analyze(&samples, 0.10);
+        let dir = tempfile::tempdir().unwrap();
+        let out_path =
+            write_dashboard_html(dir.path(), &reports, now, 7, ClockFormat::H24).unwrap();
+        let html = std::fs::read_to_string(out_path).unwrap();
+        assert!(html.contains("active-bucket"));
+        assert!(!html.contains("old-bucket"));
+
+        // 40m sample age: red (\x1b[31m) under default 15m, dark-gray (\x1b[90m) under 60m timer (120m threshold).
+        let default_ansi =
+            render_ansi_with_threshold(&reports, now, 100, 24, ClockFormat::H24, None);
+        assert!(
+            default_ansi.contains("\x1b[31mlast sample 40m ago"),
+            "expected red stale footer under default 15m:\n{default_ansi}"
+        );
+        let custom_threshold = Some(crate::timer::stale_threshold_for_interval(Some(60)));
+        let custom_ansi =
+            render_ansi_with_threshold(&reports, now, 100, 24, ClockFormat::H24, custom_threshold);
+        assert!(
+            custom_ansi.contains("\x1b[90mlast sample 40m ago"),
+            "expected non-stale dark-gray footer under 60m timer:\n{custom_ansi}"
+        );
+        assert!(!custom_ansi.contains("\x1b[31mlast sample"));
     }
 }

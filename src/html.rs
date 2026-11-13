@@ -40,6 +40,7 @@ struct DashboardData<'a> {
 /// points before/after transitions, and a heartbeat point at least every 15
 /// minutes (`900_000` ms) along long plateaus.
 pub fn compress_series(points: &[(i64, f64)]) -> Vec<(i64, f64)> {
+    debug_assert!(points.is_sorted_by_key(|p| p.0));
     if points.is_empty() {
         return Vec::new();
     }
@@ -83,9 +84,14 @@ pub fn write_atomic(path: &Path, html: &str) -> std::io::Result<()> {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
+    let existing_perms = std::fs::metadata(path).ok().map(|m| m.permissions());
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     temp.write_all(html.as_bytes())?;
     temp.flush()?;
+    if let Some(perms) = existing_perms {
+        temp.as_file().set_permissions(perms)?;
+    }
+    temp.as_file().sync_all()?;
     temp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
@@ -467,8 +473,8 @@ mod tests {
         assert!(output.contains("aria-pressed=\"false\""));
         assert!(output.contains("b.setAttribute('aria-pressed', isActive ? 'true' : 'false')"));
 
-        // Negative boundary: disabled buckets suppress range toggle controls
-        assert!(output.contains("const rangeHtml = isDis ? '' :"));
+        // Negative boundary: disabled buckets (and offline fallback without Chart.js) suppress range toggle controls
+        assert!(output.contains("const rangeHtml = (!hasCharts || isDis) ? '' :"));
 
         // Boundary plugin checks display property and chartArea existence
         assert!(output.contains("boundaries?.display === false"));
@@ -518,7 +524,7 @@ mod tests {
 
         // Unified card range buttons on every card with window-aware active defaults (5h for short, 7d for long/weekly)
         let (_, range_section) = output
-            .split_once("const rangeHtml = isDis ? '' : (isShort ? `")
+            .split_once("const rangeHtml = (!hasCharts || isDis) ? '' : (isShort ? `")
             .expect("rangeHtml section found");
         let (h_5h, h_weekly) = range_section
             .split_once("` : `")
@@ -942,6 +948,18 @@ mod tests {
         assert!(write_atomic(&err_dir, "<html>fail</html>").is_err());
         assert_eq!(std::fs::read_dir(&err_dir).unwrap().count(), 0);
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 2); // nested + existing_dir only
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o644)).unwrap();
+            write_atomic(&nested, "<html>v3</html>").unwrap();
+            let mode = std::fs::metadata(&nested).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o644,
+                "write_atomic should preserve existing file mode"
+            );
+        }
     }
 
     #[test]

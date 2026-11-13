@@ -12,14 +12,62 @@ pub fn is_executable(p: &Path) -> bool {
 }
 
 pub fn resolve_agy_bin() -> Result<PathBuf> {
-    resolve_agy_bin_from(
-        std::env::var("AGY_BIN").ok().as_deref(),
-        std::env::var("PATH").ok().as_deref(),
+    resolve_agy_bin_os(
+        std::env::var_os("AGY_BIN").as_deref(),
+        std::env::var_os("PATH").as_deref(),
     )
 }
 
 pub fn resolve_agy_bin_from(agy_env: Option<&str>, path_env: Option<&str>) -> Result<PathBuf> {
+    resolve_agy_bin_os(
+        agy_env.map(std::ffi::OsStr::new),
+        path_env.map(std::ffi::OsStr::new),
+    )
+}
+
+fn find_command_in_path(
+    name: &std::ffi::OsStr,
+    path_env: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    let path_var = path_env?;
+    for dir in std::env::split_paths(path_var) {
+        if !dir.is_absolute() {
+            continue;
+        }
+        let candidate = dir.join(name);
+        if is_executable(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn is_bare_command_name(val: &std::ffi::OsStr) -> bool {
+    let s = val.to_string_lossy();
+    if s.contains('/') || s.contains(std::path::MAIN_SEPARATOR) {
+        return false;
+    }
+    let mut comps = Path::new(val).components();
+    matches!(
+        (comps.next(), comps.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    )
+}
+
+pub fn resolve_agy_bin_os(
+    agy_env: Option<&std::ffi::OsStr>,
+    path_env: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf> {
     if let Some(val) = agy_env.filter(|s| !s.is_empty()) {
+        if is_bare_command_name(val) {
+            if let Some(found) = find_command_in_path(val, path_env) {
+                return Ok(found);
+            }
+            bail!(
+                "AGY_BIN is set to '{}', which could not be found as an executable on PATH",
+                Path::new(val).display()
+            );
+        }
         let p = PathBuf::from(val);
         if is_executable(&p) {
             return Ok(p);
@@ -29,16 +77,8 @@ pub fn resolve_agy_bin_from(agy_env: Option<&str>, path_env: Option<&str>) -> Re
             p.display()
         );
     }
-    if let Some(path_var) = path_env {
-        for dir in std::env::split_paths(path_var) {
-            if !dir.is_absolute() {
-                continue;
-            }
-            let candidate = dir.join("agy");
-            if is_executable(&candidate) {
-                return Ok(candidate);
-            }
-        }
+    if let Some(found) = find_command_in_path(std::ffi::OsStr::new("agy"), path_env) {
+        return Ok(found);
     }
     bail!(
         "could not find executable 'agy' on PATH or via $AGY_BIN. Please ensure agy is installed or set AGY_BIN"
@@ -736,6 +776,37 @@ mod tests {
         let path_with_abs = format!(":.:{}:{}", rel_to_temp.display(), temp.path().display());
         let resolved = resolve_agy_bin_from(None, Some(&path_with_abs)).unwrap();
         assert_eq!(resolved, pwd_bin);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_agy_bin_looks_up_bare_command_name_via_path_not_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let path_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&path_dir).unwrap();
+        let custom = path_dir.join("agy-custom");
+        std::fs::write(&custom, "#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&custom, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Bare command name without path separator resolves via absolute PATH entries.
+        let resolved = resolve_agy_bin_from(
+            Some("agy-custom"),
+            Some(&format!(":.:{}", path_dir.display())),
+        )
+        .unwrap();
+        assert_eq!(resolved, custom);
+
+        // If PATH has no match, a bare name must NOT match a relative file in CWD.
+        let err = resolve_agy_bin_from(Some("Cargo.toml"), Some("")).unwrap_err();
+        assert!(
+            err.to_string().contains("could not be found") && err.to_string().contains("on PATH"),
+            "unexpected error: {err}"
+        );
+
+        // Explicit relative path with separator still validates directly.
+        let err_rel = resolve_agy_bin_from(Some("./Cargo.toml"), Some("")).unwrap_err();
+        assert!(err_rel.to_string().contains("is not an executable file"));
     }
 
     #[test]

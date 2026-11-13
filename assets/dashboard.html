@@ -13,15 +13,17 @@
             --text: #f8fafc;
             --text-dim: #94a3b8;
             --accent: #38bdf8;
+            --accent-text: #38bdf8;
             --danger: #ef4444;
             --warning: #f59e0b;
             --success: #10b981;
             --table-head-bg: rgba(255, 255, 255, 0.03);
             --toggle-bg: rgba(15, 23, 42, 0.6);
             --btn-hover-bg: rgba(255, 255, 255, 0.05);
-            --btn-active-bg: rgba(56, 189, 248, 0.2);
+            --btn-active-bg: rgba(56, 189, 248, 0.16);
             --badge-bg: rgba(56, 189, 248, 0.15);
             --badge-disabled-bg: rgba(148, 163, 184, 0.15);
+            --badge-disabled-text: #cbd5e1;
             --chart-grid: rgba(255, 255, 255, 0.05);
             --chart-tick: #94a3b8;
             --chart-boundary: rgba(255, 255, 255, 0.2);
@@ -39,6 +41,7 @@
             --text: #0f172a;
             --text-dim: #475569;
             --accent: #0284c7;
+            --accent-text: #075985;
             --danger: #dc2626;
             --warning: #d97706;
             --success: #059669;
@@ -48,6 +51,7 @@
             --btn-active-bg: rgba(2, 132, 199, 0.14);
             --badge-bg: rgba(2, 132, 199, 0.12);
             --badge-disabled-bg: rgba(71, 85, 105, 0.12);
+            --badge-disabled-text: #334155;
             --chart-grid: rgba(15, 23, 42, 0.08);
             --chart-tick: #475569;
             --chart-boundary: rgba(15, 23, 42, 0.22);
@@ -112,7 +116,7 @@
         .header-btn.active {
             background: var(--btn-active-bg);
             border-color: var(--accent);
-            color: var(--accent);
+            color: var(--accent-text);
             font-weight: 600;
         }
         #empty-state {
@@ -211,7 +215,7 @@
         }
         .range-btn.active {
             background: var(--btn-active-bg);
-            color: var(--accent);
+            color: var(--accent-text);
             font-weight: 600;
         }
         .badge {
@@ -220,11 +224,11 @@
             padding: 0.2rem 0.5rem;
             border-radius: 4px;
             background: var(--badge-bg);
-            color: var(--accent);
+            color: var(--accent-text);
         }
         .badge.badge-disabled {
             background: var(--badge-disabled-bg);
-            color: var(--text-dim);
+            color: var(--badge-disabled-text);
         }
         .chart-box {
             position: relative;
@@ -356,7 +360,7 @@
         }
 
         function escapeHtml(s) {
-            if (!s) return '';
+            if (s === null || s === undefined) return '';
             return String(s)
                 .replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;')
@@ -366,7 +370,9 @@
         }
 
         function formatTimeAgo(date) {
+            if (!(date instanceof Date) || !isFinite(date.getTime())) return '—';
             const sec = Math.floor((Date.now() - date.getTime()) / 1000);
+            if (sec < 0) return 'just now';
             if (sec < 60) return `${sec}s ago`;
             const min = Math.floor(sec / 60);
             if (min < 60) return `${min}m ago`;
@@ -524,19 +530,21 @@
             const {
                 isShort,
                 endMs,
+                windowEndMs,
                 lastSampleMs,
                 windowStartMs,
                 fallbackSpanMs
             } = state;
             if (range === 'window') {
+                const winMax = Number.isFinite(windowEndMs) ? windowEndMs : endMs;
                 if (Number.isFinite(windowStartMs)) {
                     return {
                         minX: Math.min(windowStartMs, lastSampleMs),
-                        maxX: endMs,
+                        maxX: winMax,
                         boundariesDisplay: true
                     };
                 }
-                const maxX = (endMs - fallbackSpanMs <= lastSampleMs) ? endMs : lastSampleMs;
+                const maxX = (winMax - fallbackSpanMs <= lastSampleMs) ? winMax : lastSampleMs;
                 return {
                     minX: maxX - fallbackSpanMs,
                     maxX,
@@ -728,7 +736,7 @@
                     let activeElements = [];
                     let tooltipPos = { x: xScale.getPixelForValue(targetMs), y: area.top };
                     const actualIdx = sibling.data.datasets.findIndex(d => d.label === 'Actual');
-                    if (actualIdx !== -1) {
+                    if (actualIdx !== -1 && sibling.isDatasetVisible(actualIdx)) {
                         const pts = sibling.data.datasets[actualIdx].data || [];
                         const nearestIdx = findNearestActualIndex(pts, targetMs);
                         const spanMs = Math.max(1, xScale.max - xScale.min);
@@ -867,6 +875,10 @@
                 contentEl.style.display = 'none';
                 return;
             }
+            const hasCharts = typeof Chart !== 'undefined';
+            if (globalRangeEl && !hasCharts) {
+                globalRangeEl.style.display = 'none';
+            }
 
             emptyEl.style.display = 'none';
             contentEl.style.display = 'block';
@@ -895,12 +907,12 @@
                 tr.innerHTML = `
                     <td><strong>${escapeHtml(title)}</strong></td>
                     <td>${escapeHtml(leftStr)}</td>
-                    <td>${rateStr}</td>
-                    <td>${safeStr}</td>
-                    <td>${atResetStr}</td>
+                    <td>${escapeHtml(rateStr)}</td>
+                    <td>${escapeHtml(safeStr)}</td>
+                    <td>${escapeHtml(atResetStr)}</td>
                     <td>${escapeHtml(resetsStr)}</td>
-                    <td>${statusStr}</td>
-                    <td>${lastSampleStr}</td>
+                    <td>${escapeHtml(statusStr)}</td>
+                    <td>${escapeHtml(lastSampleStr)}</td>
                 `;
                 tbody.appendChild(tr);
 
@@ -908,7 +920,7 @@
                 const badgeClass = isDis ? 'badge badge-disabled' : 'badge';
 
                 const isShort = rep.window_secs != null && rep.window_secs < 86400;
-                const rangeHtml = isDis ? '' : (isShort ? `
+                const rangeHtml = (!hasCharts || isDis) ? '' : (isShort ? `
                     <div class="range-toggle" role="group" aria-label="Time range" data-idx="${idx}">
                         <button type="button" class="range-btn" data-range="window" aria-pressed="false">Window</button>
                         <button type="button" class="range-btn active" data-range="5h" aria-pressed="true">5h</button>
@@ -950,7 +962,11 @@
                 const resetMs = rep.reset_time ? new Date(rep.reset_time).getTime() : NaN;
                 const rawLastMs = p.last_sample ? new Date(p.last_sample).getTime() : NaN;
                 const lastSampleMs = !isNaN(rawLastMs) ? rawLastMs : nowMs;
-                const endMs = (!isNaN(resetMs) && resetMs > nowMs) ? resetMs : Math.max(nowMs, lastSampleMs);
+                const endMs = Math.max(
+                    (!isNaN(resetMs) && resetMs > nowMs) ? resetMs : nowMs,
+                    lastSampleMs
+                );
+                const windowEndMs = !isNaN(resetMs) ? Math.max(resetMs, lastSampleMs) : lastSampleMs;
                 const windowStartMs = rep.window_start ? new Date(rep.window_start).getTime() : NaN;
                 const fallbackSpanMs = (rep.window_secs != null && rep.window_secs > 0)
                     ? rep.window_secs * 1000
@@ -959,6 +975,7 @@
                 const initialBounds = computeRangeBounds({
                     isShort,
                     endMs,
+                    windowEndMs,
                     lastSampleMs,
                     windowStartMs,
                     fallbackSpanMs
@@ -1109,6 +1126,7 @@
                         chart,
                         isShort,
                         endMs,
+                        windowEndMs,
                         lastSampleMs,
                         windowStartMs,
                         fallbackSpanMs,

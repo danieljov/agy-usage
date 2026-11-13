@@ -39,6 +39,8 @@ pub struct TimerConfig<'a> {
 impl TimerConfig<'_> {
     fn render_unit_files(&self) -> Result<(String, String)> {
         let interval = validate_interval_minutes(self.interval_minutes)?;
+        let tight_threshold = crate::model::normalize_tight_threshold(self.tight_threshold)
+            .map_err(anyhow::Error::msg)?;
         let enc_exe = encode_unit_path(self.exe, true)?;
         let enc_agy = encode_unit_path(self.agy_bin, false)?;
         let enc_data = encode_unit_path(self.data_dir, true)?;
@@ -62,7 +64,7 @@ ExecStart="{}" --data-dir "{}" --tight-threshold {} --history-days {} --retentio
             enc_agy,
             enc_exe,
             enc_data,
-            self.tight_threshold,
+            tight_threshold,
             self.history_days,
             self.retention_days,
             clock_arg
@@ -92,6 +94,8 @@ WantedBy=timers.target
 
     fn render_launchd_plist(&self) -> Result<String> {
         let interval = validate_interval_minutes(self.interval_minutes)?;
+        let tight_threshold = crate::model::normalize_tight_threshold(self.tight_threshold)
+            .map_err(anyhow::Error::msg)?;
         let start_interval_secs = u32::from(interval) * 60;
         let enc_exe = encode_plist_path(self.exe)?;
         let enc_agy = encode_plist_path(self.agy_bin)?;
@@ -102,7 +106,7 @@ WantedBy=timers.target
             "--data-dir".to_string(),
             enc_data,
             "--tight-threshold".to_string(),
-            self.tight_threshold.to_string(),
+            tight_threshold.to_string(),
             "--history-days".to_string(),
             self.history_days.to_string(),
             "--retention-days".to_string(),
@@ -468,6 +472,80 @@ pub fn install_with_interval(
     .install()
 }
 
+/// Parses `OnCalendar=` interval in minutes from a generated systemd timer unit.
+pub fn parse_systemd_interval_minutes(timer_unit: &str) -> Option<u16> {
+    for line in timer_unit.lines() {
+        let trimmed = line.trim();
+        let Some(spec) = trimmed.strip_prefix("OnCalendar=") else {
+            continue;
+        };
+        let spec = spec.trim();
+        if spec == "*:00" {
+            return Some(60);
+        }
+        if spec == "*:*" {
+            return Some(1);
+        }
+        if let Some(step) = spec.strip_prefix("*:0/")
+            && let Ok(mins) = step.parse::<u16>()
+        {
+            return Some(mins);
+        }
+    }
+    None
+}
+
+/// Parses `<key>StartInterval</key><integer>SECONDS</integer>` from a launchd plist.
+///
+/// Anchored strictly after `<key>StartInterval</key>` so unrelated preceding
+/// `<integer>` elements in the plist cannot be matched.
+pub fn parse_launchd_interval_seconds(plist: &str) -> Option<u32> {
+    let key = "<key>StartInterval</key>";
+    let idx = plist.find(key)?;
+    let rest = plist[idx + key.len()..].trim_start();
+    let after_open = rest.strip_prefix("<integer>")?;
+    let end = after_open.find("</integer>")?;
+    after_open[..end].trim().parse::<u32>().ok()
+}
+
+/// Reads the installed collection cadence (in minutes) from a systemd/launchd directory.
+pub fn installed_interval_minutes_in(dir: &Path, is_macos: bool) -> Option<u16> {
+    if is_macos {
+        let plist_path = dir.join(format!("{LAUNCHD_LABEL}.plist"));
+        let content = std::fs::read_to_string(plist_path).ok()?;
+        let secs = parse_launchd_interval_seconds(&content)?;
+        let mins = secs / 60;
+        u16::try_from(mins).ok().filter(|&m| m > 0)
+    } else {
+        let timer_path = dir.join("agy-usage.timer");
+        let content = std::fs::read_to_string(timer_path).ok()?;
+        parse_systemd_interval_minutes(&content).filter(|&m| m > 0)
+    }
+}
+
+/// Returns the installed collection cadence (in minutes) from the current user's timer config, if readable.
+pub fn installed_interval_minutes() -> Option<u16> {
+    #[cfg(target_os = "macos")]
+    {
+        let dir = launchd_agents_dir().ok()?;
+        installed_interval_minutes_in(&dir, true)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let dir = systemd_user_dir().ok()?;
+        installed_interval_minutes_in(&dir, false)
+    }
+}
+
+/// Computes the staleness threshold for a collection interval (`max(interval * 2, 15m)`).
+pub fn stale_threshold_for_interval(interval_mins: Option<u16>) -> chrono::Duration {
+    let mins = match interval_mins {
+        Some(m) if m > 0 => (i64::from(m) * 2).max(crate::model::STALE_THRESHOLD_MINS),
+        _ => crate::model::STALE_THRESHOLD_MINS,
+    };
+    chrono::Duration::minutes(mins)
+}
+
 pub fn uninstall() -> Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -525,6 +603,64 @@ mod tests {
         assert!(timer.contains("Persistent=true"));
         assert!(!timer.contains("OnUnitActiveSec"));
         assert!(!service.contains("OnUnitActiveSec"));
+    }
+
+    #[test]
+    fn parse_launchd_interval_anchors_after_start_interval_key() {
+        let plist = r#"
+<dict>
+    <key>OtherNumber</key>
+    <integer>999</integer>
+    <key>StartInterval</key>
+    <integer>1800</integer>
+</dict>
+"#;
+        assert_eq!(parse_launchd_interval_seconds(plist), Some(1800));
+        assert_eq!(
+            parse_launchd_interval_seconds("<integer>999</integer>"),
+            None
+        );
+    }
+
+    #[test]
+    fn stale_threshold_scales_with_configured_interval() {
+        assert_eq!(
+            stale_threshold_for_interval(None),
+            chrono::Duration::minutes(15)
+        );
+        assert_eq!(
+            stale_threshold_for_interval(Some(5)),
+            chrono::Duration::minutes(15)
+        );
+        assert_eq!(
+            stale_threshold_for_interval(Some(15)),
+            chrono::Duration::minutes(30)
+        );
+        assert_eq!(
+            stale_threshold_for_interval(Some(30)),
+            chrono::Duration::minutes(60)
+        );
+        assert_eq!(
+            stale_threshold_for_interval(Some(60)),
+            chrono::Duration::minutes(120)
+        );
+    }
+
+    #[test]
+    fn timer_rejects_invalid_tight_threshold_and_normalizes_neg_zero() {
+        let exe = Path::new("/x/agy-usage");
+        let agy = Path::new("/usr/bin/agy");
+        let data = Path::new("/d");
+        for bad in [-0.1, 1.01, f64::NAN, f64::INFINITY] {
+            assert!(unit_files(exe, agy, data, bad, 30, 90, None).is_err());
+            assert!(launchd_plist(exe, agy, data, bad, 30, 90, None).is_err());
+        }
+        let (service, _) = unit_files(exe, agy, data, -0.0, 30, 90, None).unwrap();
+        assert!(service.contains("--tight-threshold 0 "));
+        assert!(!service.contains("--tight-threshold -0"));
+        let plist = launchd_plist(exe, agy, data, -0.0, 30, 90, None).unwrap();
+        assert!(plist.contains("<string>0</string>"));
+        assert!(!plist.contains("<string>-0</string>"));
     }
 
     #[test]

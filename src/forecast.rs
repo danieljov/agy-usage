@@ -207,11 +207,7 @@ pub fn prognose(current: &[Sample], tight: f64) -> Prognosis {
                 safe_rate_per_h: None,
                 at_reset: None,
                 empty_at: None,
-                status: if last.disabled {
-                    Status::Disabled
-                } else {
-                    Status::Collecting
-                },
+                status: Status::Collecting,
             };
         }
     };
@@ -534,10 +530,16 @@ pub fn analyze_owned(samples: Vec<Sample>, tight: f64) -> Vec<BucketReport> {
         // trailing `>= 0.995` plateau bounded to one window length so status evaluates cleanly.
         let current_span_sufficient = current.len() >= 2
             && (current.last().unwrap().ts - current.first().unwrap().ts) >= Duration::minutes(15);
+        let all_plateau_high = current.iter().all(|s| !s.disabled && s.remaining >= 0.995);
+        let not_declining_from_start = current
+            .first()
+            .is_none_or(|first| last.remaining >= first.remaining - 1e-6);
         if !last.disabled
             && !is_orphaned_by_longer_limit
             && last.remaining >= 0.995
             && !current_span_sufficient
+            && all_plateau_high
+            && not_declining_from_start
         {
             let plateau_cutoff = l_dur.and_then(|dur| last.ts.checked_sub_signed(dur));
             let plateau_start = candidate
@@ -2017,5 +2019,45 @@ mod tests {
         assert_ne!(find("c-7d").prognosis.status, Status::Disabled);
         assert_ne!(find("c-monthly").prognosis.status, Status::Disabled);
         assert_ne!(find("dp-1h").prognosis.status, Status::Disabled);
+    }
+
+    #[test]
+    fn declining_short_new_window_does_not_absorb_prior_100_plateau() {
+        let t0 = base_time();
+        let reset_prev = t0;
+        let reset_curr = t0 + Duration::hours(5);
+        let mk = |ts, rem, rt| Sample {
+            ts,
+            group: "Gemini Models".to_string(),
+            bucket_id: "gemini-5h".to_string(),
+            window: "5h".to_string(),
+            remaining: rem,
+            reset_time: Some(rt),
+            disabled: false,
+        };
+
+        // Pre-window 100% plateau spanning 12h, then a fresh window starts at t0
+        // and immediately declines slightly while remaining >= 0.995 across <15m.
+        let mut samples = vec![
+            mk(t0 - Duration::hours(12), 1.0, reset_prev),
+            mk(t0 - Duration::hours(6), 1.0, reset_prev),
+            mk(t0 - Duration::minutes(15), 1.0, reset_prev),
+            mk(t0, 0.998, reset_curr),
+            mk(t0 + Duration::minutes(5), 0.996, reset_curr),
+        ];
+
+        let rep_declining = &analyze(&samples, 0.10)[0];
+        assert_eq!(
+            rep_declining.current.len(),
+            2,
+            "declining new window must not pull pre-window 1.0 samples into current"
+        );
+        assert_eq!(rep_declining.prognosis.status, Status::Collecting);
+
+        // Negative boundary: untouched 100% plateau still collapses to Status::OnTrack.
+        samples[3].remaining = 1.0;
+        samples[4].remaining = 1.0;
+        let rep_plateau = &analyze(&samples, 0.10)[0];
+        assert_eq!(rep_plateau.prognosis.status, Status::OnTrack);
     }
 }

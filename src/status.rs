@@ -91,11 +91,16 @@ fn waybar_class(status: Status) -> &'static str {
 
 fn sanitize_single_line(s: &str) -> String {
     s.chars()
-        .map(|c| match c {
-            '\n' | '\r' | '\t' => ' ',
-            _ => c,
+        .filter_map(|c| match c {
+            '\n' | '\r' | '\t' | '\u{0085}' | '\u{2028}' | '\u{2029}' => Some(' '),
+            _ if c.is_control() => None,
+            _ => Some(c),
         })
         .collect()
+}
+
+fn rounded_pct(pct: f64) -> u8 {
+    pct.round().clamp(0.0, 100.0) as u8
 }
 
 fn bucket_priority_cmp(a: &BucketStatus, b: &BucketStatus) -> std::cmp::Ordering {
@@ -104,11 +109,21 @@ fn bucket_priority_cmp(a: &BucketStatus, b: &BucketStatus) -> std::cmp::Ordering
         .then_with(|| b.remaining.total_cmp(&a.remaining))
 }
 
-/// Builds a structured status snapshot from analyzed bucket reports.
+/// Builds a structured status snapshot using the default 15-minute staleness threshold.
 pub fn build_status(
     reports: &[BucketReport],
     now: DateTime<Utc>,
     clock: ClockFormat,
+) -> StatusOutput {
+    build_status_with_stale_threshold(reports, now, clock, Duration::minutes(STALE_THRESHOLD_MINS))
+}
+
+/// Builds a structured status snapshot using a custom staleness threshold (e.g., `max(interval * 2, 15m)`).
+pub fn build_status_with_stale_threshold(
+    reports: &[BucketReport],
+    now: DateTime<Utc>,
+    clock: ClockFormat,
+    stale_threshold: Duration,
 ) -> StatusOutput {
     let buckets: Vec<BucketStatus> = reports
         .iter()
@@ -139,7 +154,6 @@ pub fn build_status(
         .map(|b| b.status)
         .unwrap_or(Status::Collecting);
 
-    let stale_threshold = Duration::minutes(STALE_THRESHOLD_MINS);
     let newest_sample = buckets
         .iter()
         .filter(|b| b.status != Status::Disabled)
@@ -192,7 +206,7 @@ fn format_oneline(out: &StatusOutput) -> String {
                 Status::WillRunOut => sanitize_single_line(&b.status_label),
                 _ => status_icon(b.status).to_string(),
             };
-            format!("{label}: {:.0}% ({tag})", b.remaining_pct)
+            format!("{label}: {}% ({tag})", rounded_pct(b.remaining_pct))
         })
         .collect();
     let mut line = parts.join(" | ");
@@ -213,7 +227,7 @@ fn format_tmux(out: &StatusOutput) -> String {
         .map(|b| {
             let icon = status_icon(b.status);
             let label = sanitize_tmux(&b.label);
-            format!("{label} {:.0}% {icon}", b.remaining_pct)
+            format!("{label} {}% {icon}", rounded_pct(b.remaining_pct))
         })
         .collect();
     let mut line = parts.join(" · ");
@@ -237,7 +251,7 @@ fn format_waybar(out: &StatusOutput) -> Result<String> {
         ),
         Some(primary) => {
             let icon = status_icon(primary.status);
-            let pct_u8 = primary.remaining_pct.round().clamp(0.0, 100.0) as u8;
+            let pct_u8 = rounded_pct(primary.remaining_pct);
             let text = if out.stale {
                 format!("{icon} {pct_u8}% !")
             } else {
@@ -257,7 +271,10 @@ fn format_waybar(out: &StatusOutput) -> Result<String> {
                     };
                     format!(
                         "{}: {:.1}% ({}){}",
-                        b.label, b.remaining_pct, b.status_label, reset_str
+                        sanitize_single_line(&b.label),
+                        b.remaining_pct,
+                        sanitize_single_line(&b.status_label),
+                        reset_str
                     )
                 })
                 .collect();
@@ -308,6 +325,84 @@ pub fn write_status(
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
+
+    #[test]
+    fn sanitize_single_line_strips_controls_and_unicode_separators_and_rounds_uniformly() {
+        let dirty = "bad\x1b[31m\0\x07line\u{0085}next\u{2028}para\u{2029}end\n\r\t!";
+        assert_eq!(
+            super::sanitize_single_line(dirty),
+            "bad[31mline next para end   !"
+        );
+
+        // Halfway & near-100 percentages must round uniformly across all text formats.
+        assert_eq!(super::rounded_pct(12.5), 13);
+        assert_eq!(super::rounded_pct(99.6), 100);
+
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 12, 12, 0, 0)
+            .unwrap();
+        let mut out = super::build_status(&[], now, crate::clock::ClockFormat::H24);
+        out.buckets.push(super::BucketStatus {
+            label: "5h (\x1b[31mEvil\nLabel\u{2028}1)".to_string(),
+            group: "G".to_string(),
+            bucket_id: "b1".to_string(),
+            window: "5h".to_string(),
+            status: crate::forecast::Status::Tight,
+            status_label: "tight\x07\u{2029}warn".to_string(),
+            remaining: 0.125,
+            remaining_pct: 12.5,
+            budget_now: None,
+            rate_per_h: None,
+            safe_rate_per_h: None,
+            at_reset: None,
+            reset_time: None,
+            empty_at: None,
+            last_sample: now,
+        });
+        out.stale = false;
+        let oneline = super::format_oneline(&out);
+        assert!(
+            oneline.contains("5h ([31mEvil Label 1): 13%"),
+            "got: {oneline}"
+        );
+        assert!(!oneline.contains('\x1b') && !oneline.contains('\n'));
+
+        let tmux = super::format_tmux(&out);
+        assert!(tmux.contains("13%"), "got: {tmux}");
+
+        let waybar: serde_json::Value =
+            serde_json::from_str(&super::format_waybar(&out).unwrap()).unwrap();
+        assert_eq!(waybar["percentage"], 13);
+        let tip = waybar["tooltip"].as_str().unwrap();
+        assert!(
+            tip.contains("5h ([31mEvil Label 1): 12.5% (tight warn)"),
+            "got: {tip}"
+        );
+        assert!(!tip.contains('\x1b') && !tip.contains('\x07'));
+
+        // Custom stale threshold (e.g. 60m timer => 120m threshold) overrides 15m default.
+        let sample_ts = now - chrono::Duration::minutes(40);
+        let s = crate::model::Sample {
+            ts: sample_ts,
+            group: "Gemini".to_string(),
+            bucket_id: "g-5h".to_string(),
+            window: "5h".to_string(),
+            remaining: 0.8,
+            reset_time: Some(now + chrono::Duration::hours(4)),
+            disabled: false,
+        };
+        let reps = crate::forecast::analyze(&[s], 0.10);
+        assert!(super::build_status(&reps, now, crate::clock::ClockFormat::H24).stale);
+        assert!(
+            !super::build_status_with_stale_threshold(
+                &reps,
+                now,
+                crate::clock::ClockFormat::H24,
+                chrono::Duration::minutes(120)
+            )
+            .stale
+        );
+    }
 
     use super::*;
     use crate::forecast::Prognosis;

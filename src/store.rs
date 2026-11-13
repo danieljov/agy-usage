@@ -52,7 +52,7 @@ fn lock_sidecar(path: &Path, op: FlockOperation) -> std::io::Result<Option<LockG
             flock(&file, op).map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
             Ok(Some(LockGuard { file }))
         }
-        _ => {
+        FlockOperation::LockShared | FlockOperation::NonBlockingLockShared => {
             // Read-only callers must never create or open the sidecar lockfile for writing,
             // allowing `status`, `doctor`, and read-only mounts to inspect data cleanly.
             match OpenOptions::new().read(true).open(&lock_path) {
@@ -72,6 +72,10 @@ fn lock_sidecar(path: &Path, op: FlockOperation) -> std::io::Result<Option<LockG
                 Err(e) => Err(e),
             }
         }
+        FlockOperation::Unlock | FlockOperation::NonBlockingUnlock => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "lock_sidecar does not accept unlock operations",
+        )),
     }
 }
 
@@ -350,11 +354,105 @@ pub fn load_from(path: &Path, cursor: Cursor) -> std::io::Result<Incremental> {
     })
 }
 
+/// Constant-memory summary of `samples.jsonl` used by diagnostics like `doctor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoreSummary {
+    pub count: usize,
+    pub skipped: usize,
+    pub newest: Option<DateTime<Utc>>,
+}
+
+/// Streams `path` under a shared sidecar lock without retaining samples in memory.
+///
+/// Missing files yield an empty `StoreSummary`; unreadable or non-regular files propagate the I/O error.
+pub fn summarize(path: &Path) -> std::io::Result<StoreSummary> {
+    if !path.exists() {
+        return Ok(StoreSummary {
+            count: 0,
+            skipped: 0,
+            newest: None,
+        });
+    }
+
+    let _guard = lock_sidecar(path, FlockOperation::LockShared)?;
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(StoreSummary {
+                count: 0,
+                skipped: 0,
+                newest: None,
+            });
+        }
+        Err(e) => return Err(e),
+    };
+
+    let mut reader = BufReader::new(file);
+    let mut summary = StoreSummary {
+        count: 0,
+        skipped: 0,
+        newest: None,
+    };
+    let mut line_buf = Vec::new();
+
+    while reader.read_until(b'\n', &mut line_buf)? > 0 {
+        if !line_buf.ends_with(b"\n") {
+            break;
+        }
+        match parse_line(&line_buf) {
+            Some(Ok(sample)) => {
+                summary.count += 1;
+                summary.newest = Some(match summary.newest {
+                    Some(prev) => prev.max(sample.ts),
+                    None => sample.ts,
+                });
+            }
+            Some(Err(())) => summary.skipped += 1,
+            None => {}
+        }
+        line_buf.clear();
+    }
+
+    Ok(summary)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use tempfile::tempdir;
+
+    #[test]
+    fn summarize_streams_count_skipped_and_newest_without_missing_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("samples.jsonl");
+
+        assert_eq!(
+            summarize(&path).unwrap(),
+            StoreSummary {
+                count: 0,
+                skipped: 0,
+                newest: None,
+            }
+        );
+
+        let t1 = Utc.with_ymd_and_hms(2026, 10, 12, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 10, 12, 11, 0, 0).unwrap();
+        let mut s1 = make_sample("b", 0.9);
+        s1.ts = t1;
+        let mut s2 = make_sample("b", 0.8);
+        s2.ts = t2;
+        append(&path, &[s2, s1]).unwrap();
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(f, "{{corrupt").unwrap();
+        write!(f, "{{\"partial\":true").unwrap();
+
+        let summary = summarize(&path).unwrap();
+        assert_eq!(summary.count, 2);
+        assert_eq!(summary.skipped, 1);
+        assert_eq!(summary.newest, Some(t2));
+    }
 
     fn make_sample(id: &str, remaining: f64) -> Sample {
         Sample {

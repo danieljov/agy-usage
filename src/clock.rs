@@ -64,10 +64,7 @@ impl ClockFormat {
             if let Some(c) = gsettings.as_deref().and_then(parse_gsettings_clock_format) {
                 return c;
             }
-            resolve(
-                gsettings.as_deref(),
-                run_probe("locale", &["t_fmt"]).as_deref(),
-            )
+            resolve(None, run_probe("locale", &["t_fmt"]).as_deref())
         }
     }
 
@@ -178,24 +175,12 @@ fn parse_defaults_bool(raw: &str) -> Option<bool> {
 
 /// Parses `defaults read -g AppleICUForce24HourTime` output.
 pub fn parse_apple_force_24h(raw: &str) -> Option<ClockFormat> {
-    parse_defaults_bool(raw).map(|force| {
-        if force {
-            ClockFormat::H24
-        } else {
-            ClockFormat::H12
-        }
-    })
+    parse_defaults_bool(raw).and_then(|force| force.then_some(ClockFormat::H24))
 }
 
 /// Parses `defaults read -g AppleICUForce12HourTime` output.
 pub fn parse_apple_force_12h(raw: &str) -> Option<ClockFormat> {
-    parse_defaults_bool(raw).map(|force| {
-        if force {
-            ClockFormat::H12
-        } else {
-            ClockFormat::H24
-        }
-    })
+    parse_defaults_bool(raw).and_then(|force| force.then_some(ClockFormat::H12))
 }
 
 const APPLE_H12_REGIONS: &[&str] = &[
@@ -329,17 +314,23 @@ pub fn resolve(gsettings: Option<&str>, t_fmt: Option<&str>) -> ClockFormat {
 /// Runs a short-lived helper and returns its stdout on success, or `None` if
 /// it is missing, fails, or exceeds [`PROBE_TIMEOUT`].
 fn run_probe(program: &str, args: &[&str]) -> Option<String> {
-    let path = find_in_path(program, std::env::var("PATH").ok().as_deref())?;
+    let path_env = std::env::var_os("PATH");
+    let path = find_in_path_os(program, path_env.as_deref())?;
     run_probe_at(&path, args, PROBE_TIMEOUT)
 }
 
 /// Looks up `name` in `path_env`, skipping empty and relative entries, which
 /// `execvp` would otherwise resolve against the current directory.
-fn find_in_path(name: &str, path_env: Option<&str>) -> Option<PathBuf> {
+fn find_in_path_os(name: &str, path_env: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
     std::env::split_paths(path_env?)
         .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join(name))
         .find(|candidate| crate::source::is_executable(candidate))
+}
+
+#[cfg(test)]
+fn find_in_path(name: &str, path_env: Option<&str>) -> Option<PathBuf> {
+    find_in_path_os(name, path_env.map(std::ffi::OsStr::new))
 }
 
 fn run_probe_at(program: &Path, args: &[&str], timeout: Duration) -> Option<String> {
@@ -409,6 +400,30 @@ mod tests {
         std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         p
+    }
+
+    #[test]
+    fn parse_apple_force_flags_ignore_falsy_and_allow_fallback() {
+        assert_eq!(parse_apple_force_24h("1"), Some(ClockFormat::H24));
+        assert_eq!(parse_apple_force_24h("0"), None);
+        assert_eq!(parse_apple_force_24h("false"), None);
+        assert_eq!(parse_apple_force_12h("1"), Some(ClockFormat::H12));
+        assert_eq!(parse_apple_force_12h("0"), None);
+        assert_eq!(parse_apple_force_12h("no"), None);
+
+        // When both Apple force flags are falsy ("0"), fall through to AppleLocale / locale.
+        assert_eq!(
+            resolve_macos(Some("0"), Some("0"), Some("de_DE"), Some("%T")),
+            ClockFormat::H24
+        );
+        assert_eq!(
+            resolve_macos(Some("0"), Some("1"), Some("de_DE"), Some("%T")),
+            ClockFormat::H12
+        );
+        assert_eq!(
+            resolve_macos(None, Some("0"), Some("en_US"), Some("%r")),
+            ClockFormat::H12
+        );
     }
 
     #[test]
@@ -606,8 +621,8 @@ mod tests {
             assert_eq!(parse_apple_force_12h(truthy), Some(ClockFormat::H12));
         }
         for falsy in ["0", "0\n", " false ", "FALSE", "no", "No"] {
-            assert_eq!(parse_apple_force_24h(falsy), Some(ClockFormat::H12));
-            assert_eq!(parse_apple_force_12h(falsy), Some(ClockFormat::H24));
+            assert_eq!(parse_apple_force_24h(falsy), None);
+            assert_eq!(parse_apple_force_12h(falsy), None);
         }
         for invalid in [
             "",
@@ -697,6 +712,14 @@ mod tests {
         );
         assert_eq!(
             resolve_macos(Some("0"), Some("0"), Some("de_DE"), Some("%T")),
+            ClockFormat::H24
+        );
+        assert_eq!(
+            resolve_macos(Some("0"), Some("1"), Some("de_DE"), Some("%T")),
+            ClockFormat::H12
+        );
+        assert_eq!(
+            resolve_macos(None, Some("0"), Some("en_US"), Some("%r")),
             ClockFormat::H12
         );
         assert_eq!(

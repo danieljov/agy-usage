@@ -6,7 +6,6 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 
 use crate::clock::ClockFormat;
-use crate::model::STALE_THRESHOLD_MINS;
 use crate::source;
 use crate::store;
 use crate::timer;
@@ -119,7 +118,11 @@ fn check_data_dir(data_dir: &Path) -> DoctorCheck {
     }
 }
 
-fn check_samples_store(data_dir: &Path, now: DateTime<Utc>) -> DoctorCheck {
+fn check_samples_store(
+    data_dir: &Path,
+    now: DateTime<Utc>,
+    stale_threshold: Duration,
+) -> DoctorCheck {
     let samples_path = data_dir.join("samples.jsonl");
     match std::fs::metadata(&samples_path) {
         Ok(meta) if !meta.is_file() => {
@@ -149,54 +152,57 @@ fn check_samples_store(data_dir: &Path, now: DateTime<Utc>) -> DoctorCheck {
         Ok(_) => {}
     }
 
-    match store::load(&samples_path) {
+    match store::summarize(&samples_path) {
         Err(e) => DoctorCheck {
             name: "samples_store".to_string(),
             level: CheckLevel::Fail,
             message: format!("failed to read {}: {e}", samples_path.display()),
             detail: None,
         },
-        Ok(loaded) => {
-            let newest = loaded.samples.iter().map(|s| s.ts).max();
-            let count = loaded.samples.len();
-            match newest {
-                None => DoctorCheck {
+        Ok(summary) => match summary.newest {
+            None => DoctorCheck {
+                name: "samples_store".to_string(),
+                level: CheckLevel::Warn,
+                message: format!(
+                    "samples.jsonl contains 0 valid samples ({} skipped)",
+                    summary.skipped
+                ),
+                detail: Some("run `agy-usage collect` to record fresh quota data".to_string()),
+            },
+            Some(ts) => {
+                let age = now.signed_duration_since(ts);
+                let stale = age > stale_threshold;
+                let level = if summary.skipped > 0 || stale {
+                    CheckLevel::Warn
+                } else {
+                    CheckLevel::Ok
+                };
+                let mut notes = Vec::new();
+                if stale {
+                    notes.push(format!(
+                        "latest sample is >{}m old; check background timer",
+                        stale_threshold.num_minutes()
+                    ));
+                }
+                if summary.skipped > 0 {
+                    notes.push(format!("{} corrupt line(s) skipped", summary.skipped));
+                }
+                DoctorCheck {
                     name: "samples_store".to_string(),
-                    level: CheckLevel::Warn,
+                    level,
                     message: format!(
-                        "samples.jsonl contains 0 valid samples ({} skipped)",
-                        loaded.skipped
+                        "{} samples stored (latest {})",
+                        summary.count,
+                        format_age(age)
                     ),
-                    detail: Some("run `agy-usage collect` to record fresh quota data".to_string()),
-                },
-                Some(ts) => {
-                    let age = now.signed_duration_since(ts);
-                    let stale = age > Duration::minutes(STALE_THRESHOLD_MINS);
-                    let level = if loaded.skipped > 0 || stale {
-                        CheckLevel::Warn
+                    detail: if notes.is_empty() {
+                        None
                     } else {
-                        CheckLevel::Ok
-                    };
-                    let mut notes = Vec::new();
-                    if stale {
-                        notes.push("latest sample is >15m old; check background timer".to_string());
-                    }
-                    if loaded.skipped > 0 {
-                        notes.push(format!("{} corrupt line(s) skipped", loaded.skipped));
-                    }
-                    DoctorCheck {
-                        name: "samples_store".to_string(),
-                        level,
-                        message: format!("{count} samples stored (latest {})", format_age(age)),
-                        detail: if notes.is_empty() {
-                            None
-                        } else {
-                            Some(notes.join("; "))
-                        },
-                    }
+                        Some(notes.join("; "))
+                    },
                 }
             }
-        }
+        },
     }
 }
 
@@ -236,82 +242,136 @@ fn check_html_dashboard(data_dir: &Path) -> DoctorCheck {
     }
 }
 
-fn check_timer(timer_dir: &Result<PathBuf, String>, is_macos: bool) -> DoctorCheck {
+fn check_timer(timer_dir: &Result<PathBuf, String>, is_macos: bool) -> (DoctorCheck, Option<u16>) {
     let dir = match timer_dir {
         Ok(d) => d,
         Err(e) => {
-            return DoctorCheck {
-                name: "timer".to_string(),
-                level: CheckLevel::Warn,
-                message: "could not determine background timer directory".to_string(),
-                detail: Some(e.clone()),
-            };
+            return (
+                DoctorCheck {
+                    name: "timer".to_string(),
+                    level: CheckLevel::Warn,
+                    message: "could not determine background timer directory".to_string(),
+                    detail: Some(e.clone()),
+                },
+                None,
+            );
         }
     };
 
     if is_macos {
         let plist = dir.join(format!("{}.plist", timer::LAUNCHD_LABEL));
         if plist.is_file() {
-            let interval = std::fs::read_to_string(&plist)
-                .ok()
-                .and_then(|s| extract_launchd_interval(&s));
-            DoctorCheck {
-                name: "timer".to_string(),
-                level: CheckLevel::Ok,
-                message: format!("launchd agent installed at {}", plist.display()),
-                detail: interval.map(|secs| format!("StartInterval={secs}s")),
+            match std::fs::read_to_string(&plist) {
+                Ok(s) => {
+                    let secs = timer::parse_launchd_interval_seconds(&s);
+                    let mins = secs
+                        .and_then(|v| u16::try_from(v / 60).ok())
+                        .filter(|&m| m > 0);
+                    (
+                        DoctorCheck {
+                            name: "timer".to_string(),
+                            level: CheckLevel::Ok,
+                            message: format!("launchd agent installed at {}", plist.display()),
+                            detail: secs.map(|secs| format!("StartInterval={secs}s")),
+                        },
+                        mins,
+                    )
+                }
+                Err(e) => (
+                    DoctorCheck {
+                        name: "timer".to_string(),
+                        level: CheckLevel::Fail,
+                        message: format!("cannot read {}: {e}", plist.display()),
+                        detail: None,
+                    },
+                    None,
+                ),
             }
         } else {
-            DoctorCheck {
-                name: "timer".to_string(),
-                level: CheckLevel::Warn,
-                message: "launchd background timer is not installed".to_string(),
-                detail: Some("run `agy-usage install-timer` to schedule collection".to_string()),
-            }
+            (
+                DoctorCheck {
+                    name: "timer".to_string(),
+                    level: CheckLevel::Warn,
+                    message: "launchd background timer is not installed".to_string(),
+                    detail: Some(
+                        "run `agy-usage install-timer` to schedule collection".to_string(),
+                    ),
+                },
+                None,
+            )
         }
     } else {
         let service = dir.join("agy-usage.service");
         let unit = dir.join("agy-usage.timer");
         match (service.is_file(), unit.is_file()) {
             (true, true) => {
-                let cal = std::fs::read_to_string(&unit).ok().and_then(|s| {
-                    s.lines()
-                        .find(|l| l.starts_with("OnCalendar="))
-                        .map(str::to_string)
-                });
-                DoctorCheck {
-                    name: "timer".to_string(),
-                    level: CheckLevel::Ok,
-                    message: format!("systemd user timer installed in {}", dir.display()),
-                    detail: cal,
+                if let Err(e) = std::fs::read_to_string(&service) {
+                    return (
+                        DoctorCheck {
+                            name: "timer".to_string(),
+                            level: CheckLevel::Fail,
+                            message: format!("cannot read {}: {e}", service.display()),
+                            detail: None,
+                        },
+                        None,
+                    );
+                }
+                match std::fs::read_to_string(&unit) {
+                    Ok(s) => {
+                        let cal = s
+                            .lines()
+                            .find(|l| l.trim_start().starts_with("OnCalendar="))
+                            .map(|l| l.trim().to_string());
+                        let mins = timer::parse_systemd_interval_minutes(&s).filter(|&m| m > 0);
+                        (
+                            DoctorCheck {
+                                name: "timer".to_string(),
+                                level: CheckLevel::Ok,
+                                message: format!(
+                                    "systemd user timer installed in {}",
+                                    dir.display()
+                                ),
+                                detail: cal,
+                            },
+                            mins,
+                        )
+                    }
+                    Err(e) => (
+                        DoctorCheck {
+                            name: "timer".to_string(),
+                            level: CheckLevel::Fail,
+                            message: format!("cannot read {}: {e}", unit.display()),
+                            detail: None,
+                        },
+                        None,
+                    ),
                 }
             }
-            (false, false) => DoctorCheck {
-                name: "timer".to_string(),
-                level: CheckLevel::Warn,
-                message: "systemd user timer is not installed".to_string(),
-                detail: Some("run `agy-usage install-timer` to schedule collection".to_string()),
-            },
-            (has_service, has_timer) => DoctorCheck {
-                name: "timer".to_string(),
-                level: CheckLevel::Warn,
-                message: format!(
-                    "partial systemd timer installation (service={}, timer={})",
-                    has_service, has_timer
-                ),
-                detail: Some("re-run `agy-usage install-timer` to repair units".to_string()),
-            },
+            (false, false) => (
+                DoctorCheck {
+                    name: "timer".to_string(),
+                    level: CheckLevel::Warn,
+                    message: "systemd user timer is not installed".to_string(),
+                    detail: Some(
+                        "run `agy-usage install-timer` to schedule collection".to_string(),
+                    ),
+                },
+                None,
+            ),
+            (has_service, has_timer) => (
+                DoctorCheck {
+                    name: "timer".to_string(),
+                    level: CheckLevel::Warn,
+                    message: format!(
+                        "partial systemd timer installation (service={}, timer={})",
+                        has_service, has_timer
+                    ),
+                    detail: Some("re-run `agy-usage install-timer` to repair units".to_string()),
+                },
+                None,
+            ),
         }
     }
-}
-
-fn extract_launchd_interval(plist: &str) -> Option<u64> {
-    let idx = plist.find("<key>StartInterval</key>")?;
-    let after = &plist[idx..];
-    let open = after.find("<integer>")? + "<integer>".len();
-    let rest = &after[open..];
-    let close = rest.find("</integer>")?;
-    rest[..close].trim().parse().ok()
 }
 
 fn check_clock(detected: ClockFormat, desktop_env: Option<&str>, is_macos: bool) -> DoctorCheck {
@@ -333,12 +393,14 @@ fn check_clock(detected: ClockFormat, desktop_env: Option<&str>, is_macos: bool)
 
 /// Evaluates all read-only diagnostics from a supplied context.
 pub fn evaluate_checks(ctx: &DoctorContext<'_>) -> DoctorReport {
+    let (timer_check, interval_mins) = check_timer(&ctx.timer_dir, ctx.is_macos);
+    let stale_threshold = timer::stale_threshold_for_interval(interval_mins);
     let checks = vec![
         check_agy_binary(&ctx.agy_resolution),
         check_data_dir(ctx.data_dir),
-        check_samples_store(ctx.data_dir, ctx.now),
+        check_samples_store(ctx.data_dir, ctx.now, stale_threshold),
         check_html_dashboard(ctx.data_dir),
-        check_timer(&ctx.timer_dir, ctx.is_macos),
+        timer_check,
         check_clock(ctx.detected_clock, ctx.desktop_env.as_deref(), ctx.is_macos),
     ];
     let healthy = checks.iter().all(|c| c.level != CheckLevel::Fail);
@@ -608,5 +670,54 @@ mod tests {
 
         let mut bp = BrokenPipeWriter;
         assert!(write_doctor(&report, true, &mut bp).is_ok());
+    }
+
+    #[test]
+    fn samples_staleness_scales_with_installed_60m_timer_interval() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let timer_dir = dir.path().join("systemd");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&timer_dir).unwrap();
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
+        store::append(
+            &data_dir.join("samples.jsonl"),
+            &[Sample {
+                ts: now - Duration::minutes(40),
+                group: "Gemini".to_string(),
+                bucket_id: "g-5h".to_string(),
+                window: "5h".to_string(),
+                remaining: 0.9,
+                reset_time: None,
+                disabled: false,
+            }],
+        )
+        .unwrap();
+        std::fs::write(data_dir.join("dashboard.html"), "<html>ok</html>").unwrap();
+        std::fs::write(timer_dir.join("agy-usage.service"), "[Service]\n").unwrap();
+        std::fs::write(
+            timer_dir.join("agy-usage.timer"),
+            "[Timer]\nOnCalendar=*:00\n",
+        )
+        .unwrap();
+
+        let ctx = DoctorContext {
+            data_dir: &data_dir,
+            agy_resolution: Ok(PathBuf::from("/usr/bin/agy")),
+            timer_dir: Ok(timer_dir),
+            detected_clock: ClockFormat::H24,
+            desktop_env: Some("GNOME".to_string()),
+            is_macos: false,
+            now,
+        };
+        let report = evaluate_checks(&ctx);
+        let samples_check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "samples_store")
+            .unwrap();
+        assert_eq!(samples_check.level, CheckLevel::Ok);
+        assert_eq!(samples_check.detail, None);
     }
 }

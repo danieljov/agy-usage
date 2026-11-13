@@ -19,7 +19,7 @@ struct Cli {
     #[arg(long, global = true, value_hint = ValueHint::DirPath)]
     data_dir: Option<PathBuf>,
 
-    #[arg(long, global = true, default_value_t = 0.10)]
+    #[arg(long, global = true, default_value_t = 0.10, value_parser = agy_usage::model::parse_tight_threshold)]
     tight_threshold: f64,
 
     #[arg(long, global = true, default_value_t = 30, value_parser = clap::value_parser!(u32).range(0..=36500))]
@@ -277,16 +277,29 @@ fn main() -> Result<()> {
         Commands::Status { json, format } => {
             let data_dir = resolve_data_dir(cli.data_dir)?;
             let now = Utc::now();
-            let clock = cli.clock.resolve();
             let fmt = if json {
                 StatusFormat::Json
             } else {
                 format.map(Into::into).unwrap_or(StatusFormat::Oneline)
             };
+            let clock = match fmt {
+                StatusFormat::Waybar | StatusFormat::Json => cli.clock.resolve(),
+                StatusFormat::Oneline | StatusFormat::Tmux => {
+                    cli.clock.explicit().unwrap_or_default()
+                }
+            };
             // `status` uses a bounded 0-day history (plus 8-day margin) for sub-ms latency.
             let reports =
                 load_reports(&data_dir.join("samples.jsonl"), now, 0, cli.tight_threshold)?;
-            let output = agy_usage::status::build_status(&reports, now, clock);
+            let stale_threshold = agy_usage::timer::stale_threshold_for_interval(
+                agy_usage::timer::installed_interval_minutes(),
+            );
+            let output = agy_usage::status::build_status_with_stale_threshold(
+                &reports,
+                now,
+                clock,
+                stale_threshold,
+            );
             agy_usage::status::write_status(&output, fmt, &mut std::io::stdout())?;
         }
         Commands::Doctor { json } => {

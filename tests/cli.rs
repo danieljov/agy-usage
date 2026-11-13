@@ -1603,6 +1603,10 @@ fn cli_install_timer_validates_interval_minutes_fast() {
         !home_dir.path().join(".config").exists(),
         "invalid interval must fail before creating timer directories"
     );
+    assert!(
+        !home_dir.path().join("Library").exists(),
+        "invalid interval must fail before creating macOS launchd directories"
+    );
 }
 
 #[test]
@@ -1742,4 +1746,214 @@ fn cli_doctor_and_status_succeed_on_readonly_data_dir_without_lockfile() {
     let doctor_json: serde_json::Value = serde_json::from_slice(&doctor_out.stdout).unwrap();
     assert_eq!(doctor_json["healthy"], true);
     assert!(!data_dir.join("samples.lock").exists());
+}
+
+#[test]
+fn cli_rejects_invalid_tight_threshold_values() {
+    let bin_path = env!("CARGO_BIN_EXE_agy-usage");
+    let data_dir = tempdir().unwrap();
+    for bad in [
+        "--tight-threshold=-0.1",
+        "--tight-threshold=1.5",
+        "--tight-threshold=NaN",
+    ] {
+        let out = Command::new(bin_path)
+            .args([
+                "--data-dir",
+                &data_dir.path().display().to_string(),
+                bad,
+                "status",
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "expected {bad} to fail, stdout={}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("tight-threshold"),
+            "unexpected stderr for {bad}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn cli_status_waybar_12h_all_disabled_and_control_char_sanitization() {
+    let bin_path = env!("CARGO_BIN_EXE_agy-usage");
+    let data_dir = tempdir().unwrap();
+    let now = chrono::Utc::now();
+
+    // 1. --clock 12h status --format waybar formats tooltip timestamps with AM/PM.
+    let active_sample = agy_usage::model::Sample {
+        ts: now - chrono::Duration::minutes(2),
+        group: "Evil\x1b[31m\nGroup".to_string(),
+        bucket_id: "g-5h".to_string(),
+        window: "5h".to_string(),
+        remaining: 0.72,
+        reset_time: Some(now + chrono::Duration::hours(4)),
+        disabled: false,
+    };
+    fs::write(
+        data_dir.path().join("samples.jsonl"),
+        serde_json::to_string(&active_sample).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let waybar_out = Command::new(bin_path)
+        .args([
+            "--data-dir",
+            &data_dir.path().display().to_string(),
+            "--clock",
+            "12h",
+            "status",
+            "--format",
+            "waybar",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        waybar_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&waybar_out.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&waybar_out.stdout).unwrap();
+    let tooltip = payload["tooltip"].as_str().unwrap();
+    assert!(
+        tooltip.contains("AM") || tooltip.contains("PM"),
+        "expected 12h clock in tooltip: {tooltip}"
+    );
+    assert!(
+        !tooltip.contains('\x1b'),
+        "control char leaked into waybar tooltip: {tooltip:?}"
+    );
+
+    let oneline_out = Command::new(bin_path)
+        .args([
+            "--data-dir",
+            &data_dir.path().display().to_string(),
+            "status",
+            "--format",
+            "oneline",
+        ])
+        .output()
+        .unwrap();
+    assert!(oneline_out.status.success());
+    let oneline = String::from_utf8_lossy(&oneline_out.stdout);
+    assert_eq!(oneline.trim_end().lines().count(), 1);
+    assert!(!oneline.contains('\x1b'));
+
+    // 2. All-disabled store surfaces disabled status cleanly.
+    let disabled_dir = tempdir().unwrap();
+    let dis_sample = agy_usage::model::Sample {
+        ts: now - chrono::Duration::minutes(1),
+        group: "Claude and GPT".to_string(),
+        bucket_id: "c-5h".to_string(),
+        window: "5h".to_string(),
+        remaining: 1.0,
+        reset_time: None,
+        disabled: true,
+    };
+    fs::write(
+        disabled_dir.path().join("samples.jsonl"),
+        serde_json::to_string(&dis_sample).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let dis_json_out = Command::new(bin_path)
+        .args([
+            "--data-dir",
+            &disabled_dir.path().display().to_string(),
+            "status",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(dis_json_out.status.success());
+    let dis_json: serde_json::Value = serde_json::from_slice(&dis_json_out.stdout).unwrap();
+    assert_eq!(dis_json["worst_status"], "Disabled");
+
+    let dis_waybar_out = Command::new(bin_path)
+        .args([
+            "--data-dir",
+            &disabled_dir.path().display().to_string(),
+            "status",
+            "--format",
+            "waybar",
+        ])
+        .output()
+        .unwrap();
+    assert!(dis_waybar_out.status.success());
+    let dis_waybar: serde_json::Value = serde_json::from_slice(&dis_waybar_out.stdout).unwrap();
+    assert!(
+        dis_waybar["class"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "disabled")
+    );
+}
+
+#[test]
+fn cli_doctor_human_output_and_unreadable_files() {
+    let bin_path = env!("CARGO_BIN_EXE_agy-usage");
+    let home_dir = tempdir().unwrap();
+    let data_dir = home_dir.path().join("data");
+    fs::create_dir_all(&data_dir).unwrap();
+    let fake_bin_dir = tempdir().unwrap();
+    let fake_agy = fake_bin_dir.path().join("agy");
+    fs::write(&fake_agy, "#!/bin/sh\necho '{}'\n").unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(&fake_agy, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let human_out = Command::new(bin_path)
+        .args(["--data-dir", &data_dir.display().to_string(), "doctor"])
+        .env("HOME", home_dir.path())
+        .env("XDG_CONFIG_HOME", home_dir.path().join(".config"))
+        .env("PATH", fake_bin_dir.path())
+        .env_remove("AGY_BIN")
+        .output()
+        .unwrap();
+    assert!(human_out.status.success());
+    let human = String::from_utf8_lossy(&human_out.stdout);
+    assert!(human.contains("[OK] agy_binary"));
+    assert!(human.contains("Doctor summary: healthy"));
+
+    #[cfg(unix)]
+    {
+        let samples = data_dir.join("samples.jsonl");
+        fs::write(&samples, "{}\n").unwrap();
+        fs::set_permissions(&samples, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let locked_timer_dir = home_dir.path().join(".config").join("systemd").join("user");
+        fs::create_dir_all(&locked_timer_dir).unwrap();
+        let service = locked_timer_dir.join("agy-usage.service");
+        let timer_unit = locked_timer_dir.join("agy-usage.timer");
+        fs::write(&service, "[Service]\n").unwrap();
+        fs::write(&timer_unit, "[Timer]\nOnCalendar=*:0/5\n").unwrap();
+        fs::set_permissions(&timer_unit, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let unreadable_enforced = fs::read_to_string(&samples).is_err();
+        if unreadable_enforced {
+            let fail_out = Command::new(bin_path)
+                .args(["--data-dir", &data_dir.display().to_string(), "doctor"])
+                .env("HOME", home_dir.path())
+                .env("XDG_CONFIG_HOME", home_dir.path().join(".config"))
+                .env("PATH", fake_bin_dir.path())
+                .env_remove("AGY_BIN")
+                .output()
+                .unwrap();
+            assert!(!fail_out.status.success());
+            let stdout = String::from_utf8_lossy(&fail_out.stdout);
+            assert!(stdout.contains("[FAIL] samples_store"), "got:\n{stdout}");
+            #[cfg(not(target_os = "macos"))]
+            assert!(stdout.contains("[FAIL] timer"), "got:\n{stdout}");
+            assert!(stdout.contains("Doctor summary: unhealthy"));
+        }
+
+        fs::set_permissions(&samples, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(&timer_unit, fs::Permissions::from_mode(0o644)).unwrap();
+    }
 }
