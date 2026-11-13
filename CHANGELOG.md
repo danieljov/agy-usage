@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-13
+
+### Added
+- **Read-Only `status` & `doctor` Subcommands (`src/status.rs`, `src/doctor.rs`, `src/main.rs`, `src/lib.rs`)**:
+  - Added `agy-usage status` (`--format oneline|waybar|tmux|json` and `--json`, `schema_version: 1`) for fast, zero-`agy`-invocation status output from local `samples.jsonl` (`history_days = 0`), with `BrokenPipe` handling and control-character / Unicode line-separator sanitization.
+  - Added `agy-usage doctor [--json]` to inspect `agy` executable resolution, data directory accessibility, `samples.jsonl` health (`store::summarize`), `dashboard.html` readability, `systemd`/`launchd` timer unit configuration and cadence, and active clock-format resolution.
+- **Configurable Collection Timer Cadence (`src/timer.rs`, `src/main.rs`)**:
+  - Added `agy-usage install-timer --interval <MINUTES>` supporting divisors of 60 (`1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, 60`, default `5`; `OnCalendar=*:00` for `60` on `systemd` and `StartInterval` on `launchd`), with dynamic staleness thresholds (`max(interval * 2, 15m)`) in `tui`, `status`, and `doctor`.
+- **Interactive TUI & Self-Contained HTML Dashboard Enhancements (`src/tui.rs`, `src/html.rs`, `assets/dashboard.html`)**:
+  - Added TUI X/Y chart axis ticks on panes `>= 44x10`, backward range cycling (`T`/`W`), keyboard bucket focus navigation (`j`/`k`, `↑`/`↓`, `Tab`/`BackTab`), `o` to render and open `dashboard.html` in the default browser, `0` to dismiss help/focus, and `[10]+` table index badges.
+  - Added unified 6-button range toggles (`Window`, `5h`, `24h`, `7d`, `30d`, `All`) with a global header range bar, light/dark theme toggle (WCAG AA contrast), opt-in 60s visibility-gated auto-reload, `html::compress_series` point deduplication with JS boundary interpolation, and permission/fsync-safe `html::write_atomic`.
+- **Cross-Platform Clock Auto-Detection & CI Coverage (`src/clock.rs`, `.github/workflows/ci.yml`)**:
+  - Extended `--clock auto` to gate Linux `gsettings` probing on GNOME-family `XDG_CURRENT_DESKTOP` values and query macOS `defaults read -g` (`AppleICUForce24HourTime`, `AppleICUForce12HourTime`, `AppleLocale`) before `LC_TIME` and `24h` fallbacks.
+  - Added `macos-latest` test coverage, Draft PR skip guards (`ready_for_review`), concurrency cancellation, and `--locked` enforcement in `.github/workflows/ci.yml`.
+
+### Changed
+- **Forecasting & Burn-Rate Estimation (`src/forecast.rs`)**:
+  - Applied recency-weighted EWLS (`tau = lookback / 4` on lookbacks `>= 6h`, i.e., windows `>= 30h`) so long-window burn rates adapt faster to recent usage changes.
+  - Treated untouched `100%` rolling-reset plateaus spanning `>= 15m` as `Status::OnTrack` and generalized shorter-window sibling orphan suppression across parsed window lengths scoped by `(group, family)`.
+- **Library API (`src/lib.rs`, `src/source.rs`, `src/tui.rs`, `src/model.rs`, `src/store.rs`, `src/timer.rs`)**:
+  - Generalized `source::fetch`, `source::fetch_with_timeout`, `source::fetch_with_timeout_and_cancel`, `tui::run`, and `tui::run_with_history` binary path parameters from `&str` to `<P: AsRef<Path>>`, and enforced strict absolute `PATH` lookup via `source::resolve_agy_bin` / `source::configured_agy_bin`.
+  - Exposed `doctor` and `status` modules, `write_broken_pipe_safe` / `write_line_broken_pipe_safe` / `sanitize_single_line`, `model::parse_tight_threshold` / `normalize_tight_threshold`, `store::summarize` (`StoreSummary`), and `timer::TimerConfig` / interval helpers.
+
+### Fixed
+- **Locking, Readability & Store Integrity (`src/store.rs`, `src/source.rs`, `src/doctor.rs`, `src/timer.rs`)**:
+  - Closed unlocked-read and initial lockfile creation races in `store` by coordinating `flock` across `samples.lock` and `samples.jsonl` in consistent order and propagating permission/I/O errors instead of treating unreadable paths as missing.
+  - Added non-blocking (`O_NONBLOCK` on Unix) and no-follow (`O_NOFOLLOW` on `samples.lock`) regular-file validation across `store` readers/writers without mutating disk prior to path checks, isolated unterminated trailing lines in `store::append`, scanned full files in `store::oldest_timestamp` for minimum valid sample timestamps, and aligned `store::summarize` with `store::load` on unterminated final lines.
+  - Aligned `doctor`'s `-60s` future clock-skew threshold and added symlink/non-regular `samples.lock` diagnostics, rejected zero-minute timer intervals (`OnCalendar=*:0/0` / `StartInterval=0`), and added `source::parse_usage_with_warnings` diagnostics for malformed enabled buckets.
+- **CLI Pipe Safety, Escaping & Responsive UI (`src/main.rs`, `src/status.rs`, `src/tui.rs`, `assets/dashboard.html`)**:
+  - Routed remaining CLI and diagnostic outputs (`collect`, `html`, `install-timer`, `uninstall-timer`, `show --once`, and stderr warnings) through `BrokenPipe`-safe writers.
+  - Pango-escaped Waybar tooltip content (`escape_pango`) while keeping plain/tmux/JSON outputs unescaped, and sanitized TUI charts, tables, and status-bar `state.message` banners against ANSI escapes and Unicode line separators.
+  - Fixed `tui::print_once` terminal sizing (`once_dimensions`), rendered the status bar on empty-store screens (`height >= 4`), guarded `< 8`-row terminals in both focus and grid views, cleared out-of-range focus on shrink reloads, capped dense multi-bucket chart grids with an overflow hint, and added `.chart-title` word wrapping for narrow mobile viewports in `assets/dashboard.html`.
+
 ## [0.5.0] - 2026-10-29
 
 ### Added
@@ -169,6 +202,7 @@ Initial release of `agy-usage`: quota history, burn-rate prognosis, and interact
   - Standalone, stripped Linux x86_64 binary archives with SHA-256 checksums published via automated GitHub Release workflow.
   - Automated one-line curl installation script (`install.sh`) with automated SHA-256 checksum verification.
 
+[0.6.0]: https://github.com/danieljov/agy-usage/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/danieljov/agy-usage/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/danieljov/agy-usage/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/danieljov/agy-usage/compare/v0.3.0...v0.3.1

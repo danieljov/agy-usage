@@ -20,7 +20,7 @@ Quota history, burn-rate prognosis, and interactive TUI/HTML dashboards for Goog
 
 [![HTML Web Dashboard](https://raw.githubusercontent.com/danieljov/agy-usage/main/assets/screenshots/dashboard.png)](https://danieljov.github.io/agy-usage)
 
-Features **window-aware defaults** (5h charts default to 5h, weekly to 7d), **synchronized hover crosshairs & tooltips** across all charts, and **client-side range toggles** (`5h`, `24h`, `7d`, `30d`, `All`) with automatic reset line decluttering past 48h and 100% offline vendored assets.
+Features **window-aware defaults** (5h charts default to 5h, weekly to 7d), **synchronized hover crosshairs & tooltips** across all charts, a **light/dark theme toggle** and opt-in **Auto 60s** reload, and **global + per-card client-side range toggles** (`Window`, `5h`, `24h`, `7d`, `30d`, `All`) with automatic reset line decluttering past 48h and 100% offline vendored assets.
 
 The [live demo](https://danieljov.github.io/agy-usage) is rendered from synthetic data and rebuilt every 6 hours (as well as on pushes to `main`) via GitHub Actions (`cargo run --example generate_demo`). Relative timestamps and exhaustion prognoses reflect the state at the last deployment.
 
@@ -42,7 +42,7 @@ Pre-compiled standalone binaries for Linux (`x86_64-unknown-linux-gnu`, `aarch64
 Replace `x86_64-unknown-linux-gnu` with `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, or `aarch64-apple-darwin` to match your platform:
 ```bash
 TMP_DIR=$(mktemp -d)
-curl -fsSL https://github.com/danieljov/agy-usage/releases/download/v0.5.0/agy-usage-v0.5.0-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C "$TMP_DIR"
+curl -fsSL https://github.com/danieljov/agy-usage/releases/download/v0.6.0/agy-usage-v0.6.0-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C "$TMP_DIR"
 mkdir -p ~/.local/bin
 mv "$TMP_DIR"/agy-usage-*/agy-usage ~/.local/bin/
 rm -rf "$TMP_DIR"
