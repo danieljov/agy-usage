@@ -267,15 +267,33 @@ fn check_timer(timer_dir: &Result<PathBuf, String>, is_macos: bool) -> (DoctorCh
                     let mins = secs
                         .and_then(|v| u16::try_from(v / 60).ok())
                         .filter(|&m| m > 0);
-                    (
-                        DoctorCheck {
-                            name: "timer".to_string(),
-                            level: CheckLevel::Ok,
-                            message: format!("launchd agent installed at {}", plist.display()),
-                            detail: secs.map(|secs| format!("StartInterval={secs}s")),
-                        },
-                        mins,
-                    )
+                    if let (Some(secs), Some(mins)) = (secs, mins) {
+                        (
+                            DoctorCheck {
+                                name: "timer".to_string(),
+                                level: CheckLevel::Ok,
+                                message: format!("launchd agent installed at {}", plist.display()),
+                                detail: Some(format!("StartInterval={secs}s")),
+                            },
+                            Some(mins),
+                        )
+                    } else {
+                        (
+                            DoctorCheck {
+                                name: "timer".to_string(),
+                                level: CheckLevel::Warn,
+                                message: format!(
+                                    "launchd plist at {} has missing or invalid StartInterval",
+                                    plist.display()
+                                ),
+                                detail: Some(
+                                    "staleness check falls back to 15m; re-run `agy-usage install-timer` to repair"
+                                        .to_string(),
+                                ),
+                            },
+                            None,
+                        )
+                    }
                 }
                 Err(e) => (
                     DoctorCheck {
@@ -323,18 +341,39 @@ fn check_timer(timer_dir: &Result<PathBuf, String>, is_macos: bool) -> (DoctorCh
                             .find(|l| l.trim_start().starts_with("OnCalendar="))
                             .map(|l| l.trim().to_string());
                         let mins = timer::parse_systemd_interval_minutes(&s).filter(|&m| m > 0);
-                        (
-                            DoctorCheck {
-                                name: "timer".to_string(),
-                                level: CheckLevel::Ok,
-                                message: format!(
-                                    "systemd user timer installed in {}",
-                                    dir.display()
+                        if let Some(mins) = mins {
+                            (
+                                DoctorCheck {
+                                    name: "timer".to_string(),
+                                    level: CheckLevel::Ok,
+                                    message: format!(
+                                        "systemd user timer installed in {}",
+                                        dir.display()
+                                    ),
+                                    detail: cal,
+                                },
+                                Some(mins),
+                            )
+                        } else {
+                            let detail = match cal {
+                                Some(spec) => format!(
+                                    "{spec}; staleness check falls back to 15m; re-run `agy-usage install-timer` to repair"
                                 ),
-                                detail: cal,
-                            },
-                            mins,
-                        )
+                                None => "staleness check falls back to 15m; re-run `agy-usage install-timer` to repair".to_string(),
+                            };
+                            (
+                                DoctorCheck {
+                                    name: "timer".to_string(),
+                                    level: CheckLevel::Warn,
+                                    message: format!(
+                                        "systemd timer at {} has missing or invalid OnCalendar interval",
+                                        unit.display()
+                                    ),
+                                    detail: Some(detail),
+                                },
+                                None,
+                            )
+                        }
                     }
                     Err(e) => (
                         DoctorCheck {
@@ -719,5 +758,131 @@ mod tests {
             .unwrap();
         assert_eq!(samples_check.level, CheckLevel::Ok);
         assert_eq!(samples_check.detail, None);
+    }
+
+    #[test]
+    fn invalid_launchd_and_systemd_intervals_emit_warning_and_keep_15m_fallback() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
+        // 20m old: stale under 15m default fallback, would be fresh under 30m interval.
+        store::append(
+            &data_dir.join("samples.jsonl"),
+            &[Sample {
+                ts: now - Duration::minutes(20),
+                group: "Gemini".to_string(),
+                bucket_id: "g-5h".to_string(),
+                window: "5h".to_string(),
+                remaining: 0.9,
+                reset_time: None,
+                disabled: false,
+            }],
+        )
+        .unwrap();
+        std::fs::write(data_dir.join("dashboard.html"), "<html>ok</html>").unwrap();
+
+        // 1. launchd plist missing StartInterval
+        let launchd_missing = dir.path().join("launchd-missing");
+        std::fs::create_dir_all(&launchd_missing).unwrap();
+        std::fs::write(
+            launchd_missing.join(format!("{}.plist", timer::LAUNCHD_LABEL)),
+            "<plist><dict><key>Label</key><string>x</string></dict></plist>\n",
+        )
+        .unwrap();
+        let report_missing = evaluate_checks(&DoctorContext {
+            data_dir: &data_dir,
+            agy_resolution: Ok(PathBuf::from("/usr/bin/agy")),
+            timer_dir: Ok(launchd_missing),
+            detected_clock: ClockFormat::H24,
+            desktop_env: None,
+            is_macos: true,
+            now,
+        });
+        assert!(report_missing.healthy);
+        let timer_check = report_missing
+            .checks
+            .iter()
+            .find(|c| c.name == "timer")
+            .unwrap();
+        assert_eq!(timer_check.level, CheckLevel::Warn);
+        assert!(
+            timer_check
+                .message
+                .contains("missing or invalid StartInterval")
+        );
+
+        // 2. launchd plist with StartInterval < 60s
+        let launchd_submin = dir.path().join("launchd-submin");
+        std::fs::create_dir_all(&launchd_submin).unwrap();
+        std::fs::write(
+            launchd_submin.join(format!("{}.plist", timer::LAUNCHD_LABEL)),
+            "<plist><dict><key>StartInterval</key><integer>30</integer></dict></plist>\n",
+        )
+        .unwrap();
+        let report_submin = evaluate_checks(&DoctorContext {
+            data_dir: &data_dir,
+            agy_resolution: Ok(PathBuf::from("/usr/bin/agy")),
+            timer_dir: Ok(launchd_submin),
+            detected_clock: ClockFormat::H24,
+            desktop_env: None,
+            is_macos: true,
+            now,
+        });
+        let timer_check = report_submin
+            .checks
+            .iter()
+            .find(|c| c.name == "timer")
+            .unwrap();
+        assert_eq!(timer_check.level, CheckLevel::Warn);
+
+        // 3. Valid launchd plist with StartInterval = 1800 (30m) is Ok and scales threshold to 60m
+        let launchd_ok = dir.path().join("launchd-ok");
+        std::fs::create_dir_all(&launchd_ok).unwrap();
+        std::fs::write(
+            launchd_ok.join(format!("{}.plist", timer::LAUNCHD_LABEL)),
+            "<plist><dict><key>StartInterval</key><integer>1800</integer></dict></plist>\n",
+        )
+        .unwrap();
+        let report_ok = evaluate_checks(&DoctorContext {
+            data_dir: &data_dir,
+            agy_resolution: Ok(PathBuf::from("/usr/bin/agy")),
+            timer_dir: Ok(launchd_ok),
+            detected_clock: ClockFormat::H24,
+            desktop_env: None,
+            is_macos: true,
+            now,
+        });
+        let timer_ok = report_ok.checks.iter().find(|c| c.name == "timer").unwrap();
+        assert_eq!(timer_ok.level, CheckLevel::Ok);
+        assert_eq!(timer_ok.detail.as_deref(), Some("StartInterval=1800s"));
+        let samples_ok = report_ok
+            .checks
+            .iter()
+            .find(|c| c.name == "samples_store")
+            .unwrap();
+        assert_eq!(samples_ok.level, CheckLevel::Ok);
+
+        // 4. systemd timer with invalid OnCalendar=*:0/0 emits Warn
+        let systemd_bad = dir.path().join("systemd-bad");
+        std::fs::create_dir_all(&systemd_bad).unwrap();
+        std::fs::write(systemd_bad.join("agy-usage.service"), "[Service]\n").unwrap();
+        std::fs::write(
+            systemd_bad.join("agy-usage.timer"),
+            "[Timer]\nOnCalendar=*:0/0\n",
+        )
+        .unwrap();
+        let report_sd = evaluate_checks(&DoctorContext {
+            data_dir: &data_dir,
+            agy_resolution: Ok(PathBuf::from("/usr/bin/agy")),
+            timer_dir: Ok(systemd_bad),
+            detected_clock: ClockFormat::H24,
+            desktop_env: Some("GNOME".to_string()),
+            is_macos: false,
+            now,
+        });
+        let timer_sd = report_sd.checks.iter().find(|c| c.name == "timer").unwrap();
+        assert_eq!(timer_sd.level, CheckLevel::Warn);
+        assert!(timer_sd.message.contains("missing or invalid OnCalendar"));
     }
 }

@@ -36,46 +36,112 @@ impl Drop for LockGuard {
     }
 }
 
-fn lock_sidecar(path: &Path, op: FlockOperation) -> std::io::Result<Option<LockGuard>> {
+struct BorrowedLockGuard<'a> {
+    file: &'a fs::File,
+}
+
+impl Drop for BorrowedLockGuard<'_> {
+    fn drop(&mut self) {
+        let _ = flock(self.file, FlockOperation::Unlock);
+    }
+}
+
+struct ReadSession {
+    _sidecar: Option<LockGuard>,
+    file: fs::File,
+    unlock_file: bool,
+}
+
+impl Drop for ReadSession {
+    fn drop(&mut self) {
+        if self.unlock_file {
+            let _ = flock(&self.file, FlockOperation::Unlock);
+        }
+    }
+}
+
+fn lock_borrowed(file: &fs::File, op: FlockOperation) -> std::io::Result<BorrowedLockGuard<'_>> {
+    flock(file, op).map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
+    Ok(BorrowedLockGuard { file })
+}
+
+fn lock_sidecar_exclusive(path: &Path) -> std::io::Result<LockGuard> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
     let lock_path = path.with_extension("lock");
-    match op {
-        FlockOperation::LockExclusive | FlockOperation::NonBlockingLockExclusive => {
-            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-                fs::create_dir_all(parent)?;
-            }
-            let file = OpenOptions::new()
-                .create(true)
-                .read(true)
-                .write(true)
-                .truncate(false)
-                .open(&lock_path)?;
-            flock(&file, op).map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
-            Ok(Some(LockGuard { file }))
-        }
-        FlockOperation::LockShared | FlockOperation::NonBlockingLockShared => {
-            // Read-only callers must never create or open the sidecar lockfile for writing,
-            // allowing `status`, `doctor`, and read-only mounts to inspect data cleanly.
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    flock(&file, FlockOperation::LockExclusive)
+        .map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
+    Ok(LockGuard { file })
+}
+
+fn open_file_or_missing(path: &Path) -> std::io::Result<Option<fs::File>> {
+    match fs::File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+fn finish_sidecar_read(lock_file: fs::File, path: &Path) -> std::io::Result<Option<ReadSession>> {
+    flock(&lock_file, FlockOperation::LockShared)
+        .map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
+    let sidecar = LockGuard { file: lock_file };
+    let Some(file) = open_file_or_missing(path)? else {
+        return Ok(None);
+    };
+    Ok(Some(ReadSession {
+        _sidecar: Some(sidecar),
+        file,
+        unlock_file: false,
+    }))
+}
+
+/// Opens `path` for reading under a shared lock without mutating read-only directories.
+///
+/// Only `ErrorKind::NotFound` treats a missing sidecar lockfile or data file as absent;
+/// permission and I/O errors are propagated. When `samples.lock` does not exist yet,
+/// takes a shared `flock` on `samples.jsonl` itself and re-checks the sidecar lockfile
+/// (retaking the sidecar lock first if a writer initialized it concurrently) so readers
+/// never scan `samples.jsonl` unsynchronized against a concurrent writer.
+fn open_for_read(path: &Path) -> std::io::Result<Option<ReadSession>> {
+    let lock_path = path.with_extension("lock");
+    match OpenOptions::new().read(true).open(&lock_path) {
+        Ok(lock_file) => finish_sidecar_read(lock_file, path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let Some(file) = open_file_or_missing(path)? else {
+                return Ok(None);
+            };
+            flock(&file, FlockOperation::LockShared)
+                .map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
+
+            // Re-check after locking `samples.jsonl` in case a writer created `samples.lock`
+            // in the window above. Release `file`'s flock before locking `samples.lock` so
+            // our lock acquisition order never inverts against writers (`sidecar -> data`).
             match OpenOptions::new().read(true).open(&lock_path) {
-                Ok(file) => {
-                    flock(&file, op)
-                        .map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
-                    Ok(Some(LockGuard { file }))
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(ReadSession {
+                    _sidecar: None,
+                    file,
+                    unlock_file: true,
+                })),
+                Err(e) => {
+                    let _ = flock(&file, FlockOperation::Unlock);
+                    Err(e)
                 }
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
-                    ) =>
-                {
-                    Ok(None)
+                Ok(lock_file) => {
+                    let _ = flock(&file, FlockOperation::Unlock);
+                    drop(file);
+                    finish_sidecar_read(lock_file, path)
                 }
-                Err(e) => Err(e),
             }
         }
-        FlockOperation::Unlock | FlockOperation::NonBlockingUnlock => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "lock_sidecar does not accept unlock operations",
-        )),
+        Err(e) => Err(e),
     }
 }
 
@@ -138,9 +204,10 @@ pub fn append(path: &Path, samples: &[Sample]) -> std::io::Result<()> {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         buffer.push(b'\n');
     }
-    let _guard = lock_sidecar(path, FlockOperation::LockExclusive)?;
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    file.write_all(&buffer)?;
+    let _sidecar = lock_sidecar_exclusive(path)?;
+    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    let _data_lock = lock_borrowed(&file, FlockOperation::LockExclusive)?;
+    (&file).write_all(&buffer)?;
     Ok(())
 }
 
@@ -159,21 +226,13 @@ pub fn load_since(path: &Path, cutoff: DateTime<Utc>) -> std::io::Result<Loaded>
 }
 
 fn load_filtered(path: &Path, cutoff: Option<DateTime<Utc>>) -> std::io::Result<Loaded> {
-    if !path.exists() {
+    let Some(session) = open_for_read(path)? else {
         return Ok(Loaded {
             samples: Vec::new(),
             skipped: 0,
         });
-    }
-    let _guard = lock_sidecar(path, FlockOperation::LockShared)?;
-    if !path.exists() {
-        return Ok(Loaded {
-            samples: Vec::new(),
-            skipped: 0,
-        });
-    }
-    let file = fs::File::open(path)?;
-    let mut reader = BufReader::new(file);
+    };
+    let mut reader = BufReader::new(&session.file);
     let mut samples = Vec::new();
     let mut skipped = 0;
     let mut line_buf = Vec::new();
@@ -194,15 +253,10 @@ fn load_filtered(path: &Path, cutoff: Option<DateTime<Utc>>) -> std::io::Result<
 }
 
 pub fn oldest_timestamp(path: &Path) -> std::io::Result<Option<DateTime<Utc>>> {
-    if !path.exists() {
+    let Some(session) = open_for_read(path)? else {
         return Ok(None);
-    }
-    let _guard = lock_sidecar(path, FlockOperation::LockShared)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let file = fs::File::open(path)?;
-    let mut reader = BufReader::new(file);
+    };
+    let mut reader = BufReader::new(&session.file);
     let mut line_buf = Vec::new();
 
     while reader.read_until(b'\n', &mut line_buf)? > 0 {
@@ -215,24 +269,25 @@ pub fn oldest_timestamp(path: &Path) -> std::io::Result<Option<DateTime<Utc>>> {
 }
 
 pub fn prune(path: &Path, cutoff: DateTime<Utc>) -> std::io::Result<usize> {
-    if !path.exists() {
-        return Ok(0);
+    match fs::metadata(path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
     }
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
-    let _guard = lock_sidecar(path, FlockOperation::LockExclusive)?;
-    if !path.exists() {
+    let _sidecar = lock_sidecar_exclusive(path)?;
+    let Some(file) = open_file_or_missing(path)? else {
         return Ok(0);
-    }
-
-    let file = fs::File::open(path)?;
+    };
+    let _data_lock = lock_borrowed(&file, FlockOperation::LockExclusive)?;
     #[cfg(unix)]
     let permissions = file.metadata()?.permissions();
 
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(&file);
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     // serde_json emits many small writes per value; buffer them instead of issuing
     // a syscall per token against the temp file.
@@ -283,7 +338,7 @@ pub fn prune(path: &Path, cutoff: DateTime<Utc>) -> std::io::Result<usize> {
 /// defeat inode change detection; this is practically impossible because prunes occur at
 /// most daily and the TUI reloads every 30 seconds.
 pub fn load_from(path: &Path, cursor: Cursor) -> std::io::Result<Incremental> {
-    if !path.exists() {
+    let Some(session) = open_for_read(path)? else {
         return Ok(Incremental {
             loaded: Loaded {
                 samples: Vec::new(),
@@ -292,21 +347,9 @@ pub fn load_from(path: &Path, cursor: Cursor) -> std::io::Result<Incremental> {
             cursor: Cursor::default(),
             reset: cursor != Cursor::default(),
         });
-    }
+    };
 
-    let _guard = lock_sidecar(path, FlockOperation::LockShared)?;
-    if !path.exists() {
-        return Ok(Incremental {
-            loaded: Loaded {
-                samples: Vec::new(),
-                skipped: 0,
-            },
-            cursor: Cursor::default(),
-            reset: cursor != Cursor::default(),
-        });
-    }
-
-    let mut file = fs::File::open(path)?;
+    let mut file = &session.file;
     let meta = file.metadata()?;
     #[cfg(unix)]
     let ino = {
@@ -362,32 +405,19 @@ pub struct StoreSummary {
     pub newest: Option<DateTime<Utc>>,
 }
 
-/// Streams `path` under a shared sidecar lock without retaining samples in memory.
+/// Streams `path` under a shared lock without retaining samples in memory.
 ///
 /// Missing files yield an empty `StoreSummary`; unreadable or non-regular files propagate the I/O error.
 pub fn summarize(path: &Path) -> std::io::Result<StoreSummary> {
-    if !path.exists() {
+    let Some(session) = open_for_read(path)? else {
         return Ok(StoreSummary {
             count: 0,
             skipped: 0,
             newest: None,
         });
-    }
-
-    let _guard = lock_sidecar(path, FlockOperation::LockShared)?;
-    let file = match fs::File::open(path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(StoreSummary {
-                count: 0,
-                skipped: 0,
-                newest: None,
-            });
-        }
-        Err(e) => return Err(e),
     };
 
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(&session.file);
     let mut summary = StoreSummary {
         count: 0,
         skipped: 0,
@@ -894,5 +924,100 @@ mod tests {
             fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
         }
         assert!(!lock_path.exists(), "readers must not create samples.lock");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_lockfile_propagates_error_instead_of_unlocked_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("samples.jsonl");
+        let lock_path = path.with_extension("lock");
+        let ts = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
+        append(&path, &[sample_at("b1", ts)]).unwrap();
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o000)).unwrap();
+
+        if fs::File::open(&lock_path).is_err() {
+            assert!(load(&path).is_err());
+            assert!(load_since(&path, ts).is_err());
+            assert!(oldest_timestamp(&path).is_err());
+            assert!(load_from(&path, Cursor::default()).is_err());
+            assert!(summarize(&path).is_err());
+        }
+
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inaccessible_parent_dir_propagates_error_across_readers() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("locked");
+        fs::create_dir_all(&sub).unwrap();
+        let path = sub.join("samples.jsonl");
+        let ts = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_string(&sample_at("b1", ts)).unwrap() + "\n",
+        )
+        .unwrap();
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o000)).unwrap();
+
+        if fs::File::open(&path).is_err() {
+            assert!(summarize(&path).is_err());
+            assert!(load(&path).is_err());
+            assert!(load_since(&path, ts).is_err());
+            assert!(oldest_timestamp(&path).is_err());
+            assert!(load_from(&path, Cursor::default()).is_err());
+        }
+
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn concurrent_readers_and_writers_without_initial_lockfile_see_no_partial_lines() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("samples.jsonl");
+        let base_ts = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
+        // Seed store externally without creating samples.lock.
+        fs::write(
+            &path,
+            serde_json::to_string(&sample_at("seed", base_ts)).unwrap() + "\n",
+        )
+        .unwrap();
+        assert!(!path.with_extension("lock").exists());
+
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                for i in 1..=40 {
+                    let batch = vec![
+                        sample_at(&format!("b{i}"), base_ts + chrono::Duration::minutes(i)),
+                        sample_at(&format!("c{i}"), base_ts + chrono::Duration::minutes(i)),
+                    ];
+                    append(&path, &batch).unwrap();
+                    if i % 10 == 0 {
+                        prune(&path, base_ts + chrono::Duration::minutes(i - 5)).unwrap();
+                    }
+                }
+            });
+            for _ in 0..2 {
+                s.spawn(|| {
+                    let mut cursor = Cursor::default();
+                    for _ in 0..40 {
+                        let loaded = load(&path).unwrap();
+                        assert_eq!(loaded.skipped, 0);
+                        let sum = summarize(&path).unwrap();
+                        assert_eq!(sum.skipped, 0);
+                        assert!(sum.count >= 1);
+                        let inc = load_from(&path, cursor).unwrap();
+                        assert_eq!(inc.loaded.skipped, 0);
+                        cursor = inc.cursor;
+                    }
+                });
+            }
+        });
     }
 }

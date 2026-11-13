@@ -488,6 +488,7 @@ pub fn parse_systemd_interval_minutes(timer_unit: &str) -> Option<u16> {
         }
         if let Some(step) = spec.strip_prefix("*:0/")
             && let Ok(mins) = step.parse::<u16>()
+            && mins > 0
         {
             return Some(mins);
         }
@@ -618,6 +619,10 @@ mod tests {
         assert_eq!(parse_launchd_interval_seconds(plist), Some(1800));
         assert_eq!(
             parse_launchd_interval_seconds("<integer>999</integer>"),
+            None
+        );
+        assert_eq!(
+            parse_systemd_interval_minutes("[Timer]\nOnCalendar=*:0/0\n"),
             None
         );
     }
