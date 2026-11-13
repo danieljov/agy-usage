@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::clock::ClockFormat;
 use crate::forecast::{BucketReport, Status};
 use crate::model::{STALE_THRESHOLD_MINS, round_decimals, round4};
+use crate::sanitize_single_line;
 
 pub const STATUS_SCHEMA_VERSION: u32 = 1;
 
@@ -89,14 +90,17 @@ fn waybar_class(status: Status) -> &'static str {
     }
 }
 
-fn sanitize_single_line(s: &str) -> String {
-    s.chars()
-        .filter_map(|c| match c {
-            '\n' | '\r' | '\t' | '\u{0085}' | '\u{2028}' | '\u{2029}' => Some(' '),
-            _ if c.is_control() => None,
-            _ => Some(c),
-        })
-        .collect()
+fn escape_pango(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn rounded_pct(pct: f64) -> u8 {
@@ -271,9 +275,9 @@ fn format_waybar(out: &StatusOutput) -> Result<String> {
                     };
                     format!(
                         "{}: {:.1}% ({}){}",
-                        sanitize_single_line(&b.label),
+                        escape_pango(&sanitize_single_line(&b.label)),
                         b.remaining_pct,
-                        sanitize_single_line(&b.status_label),
+                        escape_pango(&sanitize_single_line(&b.status_label)),
                         reset_str
                     )
                 })
@@ -572,5 +576,35 @@ mod tests {
         let out = build_status(&[], now, ClockFormat::H24);
         let mut writer = BrokenPipeWriter;
         assert!(write_status(&out, StatusFormat::Json, &mut writer).is_ok());
+    }
+
+    #[test]
+    fn waybar_tooltip_escapes_pango_markup_while_plain_and_json_preserve_literals() {
+        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
+        let reports = vec![report(
+            "Group <script>&\"",
+            "b1",
+            "5h",
+            0.5,
+            Status::OnTrack,
+            now,
+            None,
+        )];
+        let out = build_status(&reports, now, ClockFormat::H24);
+
+        let waybar: serde_json::Value =
+            serde_json::from_str(&format_status(&out, StatusFormat::Waybar).unwrap()).unwrap();
+        let tooltip = waybar["tooltip"].as_str().unwrap();
+        assert!(tooltip.contains("Group &lt;script&gt;&amp;\""));
+        assert!(!tooltip.contains("<script>"));
+
+        // Negative boundary assertion: oneline, tmux, and json do not HTML/Pango-escape labels.
+        let oneline = format_status(&out, StatusFormat::Oneline).unwrap();
+        assert!(oneline.contains("Group <script>&\""));
+        let tmux = format_status(&out, StatusFormat::Tmux).unwrap();
+        assert!(tmux.contains("Group <script>&\""));
+        let json: serde_json::Value =
+            serde_json::from_str(&format_status(&out, StatusFormat::Json).unwrap()).unwrap();
+        assert_eq!(json["buckets"][0]["group"], "Group <script>&\"");
     }
 }

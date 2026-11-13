@@ -302,14 +302,37 @@ pub fn draw(frame: &mut Frame, reports: &[BucketReport], state: &ViewState, now:
             "No samples yet — run \"agy-usage install-timer\" or \"agy-usage collect\".",
         )
         .block(Block::default().borders(Borders::ALL).title("agy-usage"));
-        frame.render_widget(empty_msg, area);
+        if area.height >= 4 {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(1)])
+                .split(area);
+            frame.render_widget(empty_msg, chunks[0]);
+            draw_status_bar(frame, reports, state, chunks[1], now);
+        } else {
+            frame.render_widget(empty_msg, area);
+        }
         if state.show_help {
             draw_help_modal(frame, area);
         }
         return;
     }
 
-    if let Some(focus_idx) = state.focus.filter(|&idx| idx < reports.len()) {
+    let active_focus = state.focus.filter(|&idx| idx < reports.len());
+    if area.height < 8 {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(area);
+        draw_table(frame, reports, chunks[0], now, active_focus, state.clock);
+        draw_status_bar(frame, reports, state, chunks[1], now);
+        if state.show_help {
+            draw_help_modal(frame, area);
+        }
+        return;
+    }
+
+    if let Some(focus_idx) = active_focus {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -337,6 +360,7 @@ pub fn draw(frame: &mut Frame, reports: &[BucketReport], state: &ViewState, now:
     }
 
     // Grid layout
+
     let table_height = (reports.len() as u16 + 3).min(area.height.saturating_sub(4));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -350,12 +374,29 @@ pub fn draw(frame: &mut Frame, reports: &[BucketReport], state: &ViewState, now:
     let top_area = chunks[0];
     let cols = if top_area.width >= 100 { 2 } else { 1 };
     let num_rows = reports.len().div_ceil(cols);
+    let fits_all_rows = num_rows.saturating_mul(3) <= top_area.height as usize;
 
-    let row_constraints = vec![Constraint::Ratio(1, num_rows.max(1) as u32); num_rows];
+    let (charts_area, hint_area, visible_rows) = if fits_all_rows {
+        (top_area, None, num_rows)
+    } else {
+        let (charts_rect, hint_rect) = if top_area.height >= 4 {
+            let split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(1)])
+                .split(top_area);
+            (split[0], Some(split[1]))
+        } else {
+            (top_area, None)
+        };
+        let visible = ((charts_rect.height / 3) as usize).max(1).min(num_rows);
+        (charts_rect, hint_rect, visible)
+    };
+
+    let row_constraints = vec![Constraint::Ratio(1, visible_rows.max(1) as u32); visible_rows];
     let row_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(row_constraints)
-        .split(top_area);
+        .split(charts_area);
 
     for (r_idx, r_chunk) in row_chunks.iter().enumerate() {
         let cols_in_row = reports.len().saturating_sub(r_idx * cols).min(cols);
@@ -378,6 +419,19 @@ pub fn draw(frame: &mut Frame, reports: &[BucketReport], state: &ViewState, now:
                     now,
                 );
             }
+        }
+    }
+
+    if let Some(hint_rect) = hint_area {
+        let shown = visible_rows.saturating_mul(cols).min(reports.len());
+        let hidden = reports.len().saturating_sub(shown);
+        if hidden > 0 {
+            let hint = Paragraph::new(format!(
+                "… +{hidden} more bucket(s) in table below — press 1-9 / j / k to focus"
+            ))
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(hint, hint_rect);
         }
     }
 
@@ -466,7 +520,7 @@ fn draw_chart(
         String::new()
     };
 
-    let base_label = rep.label(all_reports);
+    let base_label = crate::sanitize_single_line(&rep.label(all_reports));
     let mut title = if rep.prognosis.status == Status::Disabled {
         if let Some(idx) = index {
             format!("[{}] {}{}  disabled", idx + 1, base_label, range_badge)
@@ -709,12 +763,12 @@ fn draw_table(
             let status_str = p.status_label(now);
             let age_str = format_time_ago_compact(p.last_sample, now);
 
-            let group_label = rep.group_label(reports);
+            let group_label = crate::sanitize_single_line(&rep.group_label(reports));
             let group_cell = format!("[{}] {}", idx + 1, group_label);
 
             let mut row_cells = vec![
                 Cell::from(group_cell),
-                Cell::from(format_window(&rep.window)),
+                Cell::from(crate::sanitize_single_line(&format_window(&rep.window))),
                 Cell::from(left_str),
                 Cell::from(rate_str),
                 Cell::from(budget_str),
@@ -801,6 +855,8 @@ fn draw_status_bar(
             state.clock.format_datetime(&now.with_timezone(&Local))
         )
     } else if let Some(msg) = &state.message {
+        let clean_msg = crate::sanitize_single_line(msg);
+        let msg = clean_msg.as_str();
         let wide = format!(
             "msg: {} | Esc: Grid  1-9: Focus  {}  r: Refresh  ?: Help  q: Quit",
             msg, range_hint
@@ -1268,16 +1324,21 @@ pub fn print_once(reports: &[BucketReport], now: DateTime<Utc>, clock: ClockForm
         crate::timer::installed_interval_minutes(),
     ));
 
+    let mut stdout = std::io::stdout();
     if is_tty {
-        print!(
-            "{}",
-            render_ansi_with_threshold(reports, now, w, h, clock, stale_threshold)
-        );
+        let rendered = render_ansi_with_threshold(reports, now, w, h, clock, stale_threshold);
+        crate::write_broken_pipe_safe(
+            rendered.as_bytes(),
+            "failed to write terminal dashboard",
+            &mut stdout,
+        )?;
     } else {
-        println!(
-            "{}",
-            render_plain_with_threshold(reports, now, w, h, clock, stale_threshold)
-        );
+        let rendered = render_plain_with_threshold(reports, now, w, h, clock, stale_threshold);
+        crate::write_line_broken_pipe_safe(
+            &rendered,
+            "failed to write terminal dashboard",
+            &mut stdout,
+        )?;
     }
     Ok(())
 }
@@ -1376,6 +1437,9 @@ fn apply_reload(
                 changed = true;
             }
             if let Some(new_reports) = reloaded.reports {
+                if state.focus.is_some_and(|idx| idx >= new_reports.len()) {
+                    state.focus = None;
+                }
                 *reports = new_reports;
                 changed = true;
             }
@@ -3874,5 +3938,119 @@ mod tests {
             "expected non-stale dark-gray footer under 60m timer:\n{custom_ansi}"
         );
         assert!(!custom_ansi.contains("\x1b[31mlast sample"));
+    }
+
+    #[test]
+    fn sanitizes_unicode_separators_renders_empty_status_clears_focus_and_caps_dense_grid() {
+        let now = Utc.with_ymd_and_hms(2026, 11, 13, 12, 0, 0).unwrap();
+
+        // 1. Unicode line/paragraph separators in labels/windows are sanitized in plain & ANSI output.
+        let mut bad_reports = make_test_reports();
+        bad_reports[0].group = "Group\u{2028}One\u{2029}Two".to_string();
+        bad_reports[0].window = "5h\u{2028}win".to_string();
+        let plain_bad = render_plain(&bad_reports, now, 120, 40, ClockFormat::H24);
+        assert!(!plain_bad.contains('\u{2028}'));
+        assert!(!plain_bad.contains('\u{2029}'));
+        assert!(plain_bad.contains("Group One Two"));
+        let ansi_bad = render_ansi(&bad_reports, now, 120, 40, ClockFormat::H24);
+        assert!(!ansi_bad.contains('\u{2028}'));
+        assert!(!ansi_bad.contains('\u{2029}'));
+
+        // 2. Empty-store screen preserves status bar message and sanitizes ANSI/line breaks.
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let empty_state = ViewState {
+            message: Some("Skipped 2\x1b[31m corrupt\nlines\u{2028}ok".to_string()),
+            ..Default::default()
+        };
+        terminal.draw(|f| draw(f, &[], &empty_state, now)).unwrap();
+        let mut empty_text = String::new();
+        for y in 0..24 {
+            for cell in visible_cells(terminal.backend().buffer(), y, 100) {
+                empty_text.push_str(cell.symbol());
+            }
+            empty_text.push('\n');
+        }
+        assert!(empty_text.contains("install-timer"));
+        assert!(empty_text.contains("Skipped 2[31m corrupt lines ok"));
+        assert!(!empty_text.contains('\x1b'));
+        assert!(!empty_text.contains('\u{2028}'));
+
+        // 3. `apply_reload` clears focus when bucket count shrinks below focus, keeping it when still valid.
+        let make_n = |n: usize| -> Vec<BucketReport> {
+            (0..n)
+                .map(|i| {
+                    let s = vec![Sample {
+                        ts: now - chrono::Duration::minutes(10),
+                        group: format!("Pool {i:02}"),
+                        bucket_id: format!("b-{i:02}"),
+                        window: "5h".to_string(),
+                        remaining: 0.75,
+                        reset_time: Some(now + chrono::Duration::hours(4)),
+                        disabled: false,
+                    }];
+                    analyze(&s, 0.10).into_iter().next().unwrap()
+                })
+                .collect()
+        };
+        let mut current = make_n(6);
+        let mut state = ViewState {
+            focus: Some(4),
+            ..Default::default()
+        };
+        let mut load_error = None;
+        let path = Path::new("/tmp/test-reload.jsonl");
+        // Negative boundary: count >= 2 keeps valid focus Some(1).
+        let mut keep_state = ViewState {
+            focus: Some(1),
+            ..Default::default()
+        };
+        apply_reload(
+            Ok(Reloaded {
+                reports: Some(make_n(2)),
+                skipped: 0,
+            }),
+            path,
+            &mut current,
+            &mut keep_state,
+            &mut load_error,
+        );
+        assert_eq!(keep_state.focus, Some(1));
+
+        // Out-of-range focus Some(4) resets to None when shrinking 6 -> 2, and stays None on 2 -> 6.
+        apply_reload(
+            Ok(Reloaded {
+                reports: Some(make_n(2)),
+                skipped: 0,
+            }),
+            path,
+            &mut current,
+            &mut state,
+            &mut load_error,
+        );
+        assert_eq!(state.focus, None);
+        apply_reload(
+            Ok(Reloaded {
+                reports: Some(make_n(6)),
+                skipped: 0,
+            }),
+            path,
+            &mut current,
+            &mut state,
+            &mut load_error,
+        );
+        assert_eq!(state.focus, None);
+
+        // 4. 12-bucket dense grids render consecutive top rows + overflow hint cleanly at 110x24 and 110x30.
+        let twelve = make_n(12);
+        let dense_24 = render_plain(&twelve, now, 110, 24, ClockFormat::H24);
+        assert!(dense_24.contains("[1] Pool 00"));
+        assert!(dense_24.contains("[4] Pool 03"));
+        assert!(dense_24.contains("+8 more bucket(s) in table below"));
+
+        let dense_30 = render_plain(&twelve, now, 110, 30, ClockFormat::H24);
+        assert!(dense_30.contains("[1] Pool 00"));
+        assert!(dense_30.contains("[8] Pool 07"));
+        assert!(dense_30.contains("+4 more bucket(s) in table below"));
     }
 }

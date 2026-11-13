@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -65,24 +65,80 @@ fn lock_borrowed(file: &fs::File, op: FlockOperation) -> std::io::Result<Borrowe
     Ok(BorrowedLockGuard { file })
 }
 
+fn ensure_regular_file(file: fs::File, path: &Path) -> std::io::Result<fs::File> {
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    Ok(file)
+}
+
+fn validate_store_file_path(path: &Path) -> std::io::Result<()> {
+    let ends_with_sep = {
+        #[cfg(unix)]
+        {
+            path.as_os_str().as_encoded_bytes().ends_with(b"/")
+        }
+        #[cfg(not(unix))]
+        {
+            let bytes = path.as_os_str().as_encoded_bytes();
+            bytes.ends_with(b"/") || bytes.ends_with(b"\\")
+        }
+    };
+    if path.file_name().is_none() || ends_with_sep {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+fn open_regular_with_options(
+    opts: &mut OpenOptions,
+    path: &Path,
+    nofollow: bool,
+) -> std::io::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Use O_NONBLOCK so FIFOs/blocking device nodes fail at ensure_regular_file instead of
+        // hanging inside open(2).
+        let mut flags = rustix::fs::OFlags::NONBLOCK;
+        if nofollow {
+            flags |= rustix::fs::OFlags::NOFOLLOW;
+        }
+        opts.custom_flags(flags.bits() as i32);
+    }
+    #[cfg(not(unix))]
+    let _ = nofollow;
+    let file = opts.open(path)?;
+    ensure_regular_file(file, path)
+}
+
 fn lock_sidecar_exclusive(path: &Path) -> std::io::Result<LockGuard> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
     let lock_path = path.with_extension("lock");
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)?;
+    let file = open_regular_with_options(
+        OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false),
+        &lock_path,
+        true,
+    )?;
     flock(&file, FlockOperation::LockExclusive)
         .map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
     Ok(LockGuard { file })
 }
 
 fn open_file_or_missing(path: &Path) -> std::io::Result<Option<fs::File>> {
-    match fs::File::open(path) {
+    match open_regular_with_options(OpenOptions::new().read(true), path, false) {
         Ok(file) => Ok(Some(file)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
@@ -112,7 +168,7 @@ fn finish_sidecar_read(lock_file: fs::File, path: &Path) -> std::io::Result<Opti
 /// never scan `samples.jsonl` unsynchronized against a concurrent writer.
 fn open_for_read(path: &Path) -> std::io::Result<Option<ReadSession>> {
     let lock_path = path.with_extension("lock");
-    match OpenOptions::new().read(true).open(&lock_path) {
+    match open_regular_with_options(OpenOptions::new().read(true), &lock_path, true) {
         Ok(lock_file) => finish_sidecar_read(lock_file, path),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let Some(file) = open_file_or_missing(path)? else {
@@ -124,7 +180,7 @@ fn open_for_read(path: &Path) -> std::io::Result<Option<ReadSession>> {
             // Re-check after locking `samples.jsonl` in case a writer created `samples.lock`
             // in the window above. Release `file`'s flock before locking `samples.lock` so
             // our lock acquisition order never inverts against writers (`sidecar -> data`).
-            match OpenOptions::new().read(true).open(&lock_path) {
+            match open_regular_with_options(OpenOptions::new().read(true), &lock_path, true) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(ReadSession {
                     _sidecar: None,
                     file,
@@ -195,6 +251,18 @@ pub fn append(path: &Path, samples: &[Sample]) -> std::io::Result<()> {
     if samples.is_empty() {
         return Ok(());
     }
+    validate_store_file_path(path)?;
+    match fs::metadata(path) {
+        Ok(meta) if !meta.is_file() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} is not a regular file", path.display()),
+            ));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
@@ -205,9 +273,29 @@ pub fn append(path: &Path, samples: &[Sample]) -> std::io::Result<()> {
         buffer.push(b'\n');
     }
     let _sidecar = lock_sidecar_exclusive(path)?;
-    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    let file = open_regular_with_options(
+        OpenOptions::new().create(true).read(true).append(true),
+        path,
+        false,
+    )?;
     let _data_lock = lock_borrowed(&file, FlockOperation::LockExclusive)?;
-    (&file).write_all(&buffer)?;
+    let needs_leading_newline = if file.metadata()?.len() > 0 {
+        let mut reader = &file;
+        reader.seek(SeekFrom::End(-1))?;
+        let mut last = [0u8; 1];
+        reader.read_exact(&mut last)?;
+        last[0] != b'\n'
+    } else {
+        false
+    };
+    if needs_leading_newline {
+        let mut prefixed = Vec::with_capacity(buffer.len() + 1);
+        prefixed.push(b'\n');
+        prefixed.extend_from_slice(&buffer);
+        (&file).write_all(&prefixed)?;
+    } else {
+        (&file).write_all(&buffer)?;
+    }
     Ok(())
 }
 
@@ -258,19 +346,31 @@ pub fn oldest_timestamp(path: &Path) -> std::io::Result<Option<DateTime<Utc>>> {
     };
     let mut reader = BufReader::new(&session.file);
     let mut line_buf = Vec::new();
+    let mut oldest: Option<DateTime<Utc>> = None;
 
     while reader.read_until(b'\n', &mut line_buf)? > 0 {
-        if let Some(Ok(sample)) = parse_line(&line_buf) {
-            return Ok(Some(sample.ts));
+        if let Some(Ok(line)) = trimmed_line(&line_buf)
+            && let Ok(TsOnly { ts }) = serde_json::from_str::<TsOnly>(line)
+            && oldest.is_none_or(|prev| ts < prev)
+            && serde_json::from_str::<Sample>(line).is_ok()
+        {
+            oldest = Some(ts);
         }
         line_buf.clear();
     }
-    Ok(None)
+    Ok(oldest)
 }
 
 pub fn prune(path: &Path, cutoff: DateTime<Utc>) -> std::io::Result<usize> {
+    validate_store_file_path(path)?;
     match fs::metadata(path) {
-        Ok(_) => {}
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} is not a regular file", path.display()),
+            ));
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(e) => return Err(e),
     }
@@ -426,9 +526,6 @@ pub fn summarize(path: &Path) -> std::io::Result<StoreSummary> {
     let mut line_buf = Vec::new();
 
     while reader.read_until(b'\n', &mut line_buf)? > 0 {
-        if !line_buf.ends_with(b"\n") {
-            break;
-        }
         match parse_line(&line_buf) {
             Some(Ok(sample)) => {
                 summary.count += 1;
@@ -479,8 +576,11 @@ mod tests {
         write!(f, "{{\"partial\":true").unwrap();
 
         let summary = summarize(&path).unwrap();
+        let loaded = load(&path).unwrap();
         assert_eq!(summary.count, 2);
-        assert_eq!(summary.skipped, 1);
+        assert_eq!(summary.skipped, 2);
+        assert_eq!(summary.count, loaded.samples.len());
+        assert_eq!(summary.skipped, loaded.skipped);
         assert_eq!(summary.newest, Some(t2));
     }
 
@@ -1019,5 +1119,163 @@ mod tests {
                 });
             }
         });
+    }
+
+    #[test]
+    fn append_isolates_unterminated_partial_line_and_skips_extra_newline_when_terminated() {
+        let dir = tempdir().unwrap();
+        let partial_path = dir.path().join("partial.jsonl");
+        let ts = Utc.with_ymd_and_hms(2026, 11, 13, 10, 0, 0).unwrap();
+        fs::write(
+            &partial_path,
+            r#"{"ts":"2026-11-13T10:00:00Z","partial":true"#,
+        )
+        .unwrap();
+
+        append(&partial_path, &[sample_at("b1", ts), sample_at("b2", ts)]).unwrap();
+        let loaded = load(&partial_path).unwrap();
+        assert_eq!(loaded.skipped, 1);
+        assert_eq!(loaded.samples.len(), 2);
+
+        // Negative boundary assertion: already newline-terminated store receives no blank separator line.
+        let clean_path = dir.path().join("clean.jsonl");
+        append(&clean_path, &[sample_at("b1", ts)]).unwrap();
+        append(&clean_path, &[sample_at("b2", ts)]).unwrap();
+        let raw = fs::read_to_string(&clean_path).unwrap();
+        assert_eq!(raw.lines().count(), 2);
+        assert!(!raw.contains("\n\n"));
+    }
+
+    #[test]
+    fn oldest_timestamp_finds_minimum_across_out_of_order_lines() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("samples.jsonl");
+        let recent = Utc.with_ymd_and_hms(2026, 11, 13, 12, 0, 0).unwrap();
+        let old = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        fs::write(
+            &path,
+            format!(
+                "{{\"ts\":\"2020-01-01T00:00:00Z\",\"partial\":true}}\n{}\n{}\n",
+                serde_json::to_string(&sample_at("new", recent)).unwrap(),
+                serde_json::to_string(&sample_at("old", old)).unwrap(),
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(oldest_timestamp(&path).unwrap(), Some(old));
+    }
+
+    #[test]
+    fn directory_at_lock_or_data_path_returns_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("samples.jsonl");
+        let ts = Utc.with_ymd_and_hms(2026, 11, 13, 12, 0, 0).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_string(&sample_at("b1", ts)).unwrap() + "\n",
+        )
+        .unwrap();
+        fs::create_dir_all(path.with_extension("lock")).unwrap();
+
+        assert!(load(&path).is_err());
+        assert!(load_since(&path, ts).is_err());
+        assert!(oldest_timestamp(&path).is_err());
+        assert!(summarize(&path).is_err());
+        assert!(append(&path, &[sample_at("b2", ts)]).is_err());
+        assert!(prune(&path, ts).is_err());
+
+        let dir_store = tempdir().unwrap();
+        let dir_path = dir_store.path().join("samples.jsonl");
+        fs::create_dir_all(&dir_path).unwrap();
+        assert!(load(&dir_path).is_err());
+        assert!(load_since(&dir_path, ts).is_err());
+        assert!(oldest_timestamp(&dir_path).is_err());
+        assert!(summarize(&dir_path).is_err());
+        assert!(append(&dir_path, &[sample_at("b2", ts)]).is_err());
+        assert!(prune(&dir_path, ts).is_err());
+        assert!(!dir_path.with_extension("lock").exists());
+
+        let slash_path = dir_store.path().join("samples.jsonl/");
+        assert!(append(&slash_path, &[sample_at("b2", ts)]).is_err());
+        assert!(prune(&slash_path, ts).is_err());
+        assert!(!dir_store.path().join("samples.lock").exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            use std::process::Command;
+
+            // Dangling or target symlinks at samples.lock must be rejected without creating targets.
+            let sym_dir = tempdir().unwrap();
+            let sym_data = sym_dir.path().join("samples.jsonl");
+            let sym_lock = sym_dir.path().join("samples.lock");
+            let stray_target = sym_dir.path().join("stray_lock_target");
+            fs::write(
+                &sym_data,
+                serde_json::to_string(&sample_at("b1", ts)).unwrap() + "\n",
+            )
+            .unwrap();
+            symlink(&stray_target, &sym_lock).unwrap();
+            assert!(load(&sym_data).is_err());
+            assert!(summarize(&sym_data).is_err());
+            assert!(append(&sym_data, &[sample_at("b2", ts)]).is_err());
+            assert!(!stray_target.exists());
+
+            // FIFOs at samples.lock or samples.jsonl must fail without blocking.
+            let fifo_lock_dir = tempdir().unwrap();
+            let fifo_data = fifo_lock_dir.path().join("samples.jsonl");
+            let fifo_lock = fifo_lock_dir.path().join("samples.lock");
+            fs::write(
+                &fifo_data,
+                serde_json::to_string(&sample_at("b1", ts)).unwrap() + "\n",
+            )
+            .unwrap();
+            let st1 = Command::new("mkfifo").arg(&fifo_lock).status().unwrap();
+            assert!(st1.success());
+            assert!(load(&fifo_data).is_err());
+            assert!(summarize(&fifo_data).is_err());
+            assert!(append(&fifo_data, &[sample_at("b2", ts)]).is_err());
+
+            let fifo_data_dir = tempdir().unwrap();
+            let fifo_store = fifo_data_dir.path().join("samples.jsonl");
+            let st2 = Command::new("mkfifo").arg(&fifo_store).status().unwrap();
+            assert!(st2.success());
+            assert!(load(&fifo_store).is_err());
+            assert!(summarize(&fifo_store).is_err());
+            assert!(append(&fifo_store, &[sample_at("b2", ts)]).is_err());
+            assert!(prune(&fifo_store, ts).is_err());
+            assert!(!fifo_store.with_extension("lock").exists());
+        }
+    }
+
+    #[test]
+    fn summarize_matches_load_on_unterminated_final_lines() {
+        let dir = tempdir().unwrap();
+        let ts = Utc.with_ymd_and_hms(2026, 11, 13, 12, 0, 0).unwrap();
+
+        let valid_no_nl = dir.path().join("valid.jsonl");
+        fs::write(
+            &valid_no_nl,
+            serde_json::to_string(&sample_at("b1", ts)).unwrap(),
+        )
+        .unwrap();
+        let loaded_v = load(&valid_no_nl).unwrap();
+        let sum_v = summarize(&valid_no_nl).unwrap();
+        assert_eq!(sum_v.count, loaded_v.samples.len());
+        assert_eq!(sum_v.skipped, loaded_v.skipped);
+
+        let corrupt_no_nl = dir.path().join("corrupt.jsonl");
+        fs::write(
+            &corrupt_no_nl,
+            format!(
+                "{}\n{{\"partial\":true",
+                serde_json::to_string(&sample_at("b1", ts)).unwrap()
+            ),
+        )
+        .unwrap();
+        let loaded_c = load(&corrupt_no_nl).unwrap();
+        let sum_c = summarize(&corrupt_no_nl).unwrap();
+        assert_eq!(sum_c.count, loaded_c.samples.len());
+        assert_eq!(sum_c.skipped, loaded_c.skipped);
     }
 }

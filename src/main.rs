@@ -173,6 +173,14 @@ fn resolve_data_dir(data_dir: Option<PathBuf>) -> Result<PathBuf> {
 /// history when a bucket sampled since the cutoff has a window of unknown length, whose
 /// prognosis can depend on arbitrarily old samples. Either way, buckets with no recent
 /// samples are omitted by [`agy_usage::forecast::analyze_since`].
+fn write_stderr_line(msg: &str) {
+    let _ = agy_usage::write_line_broken_pipe_safe(
+        msg,
+        "failed to write diagnostic output",
+        &mut std::io::stderr(),
+    );
+}
+
 fn load_reports(
     samples_path: &Path,
     now: chrono::DateTime<Utc>,
@@ -186,7 +194,10 @@ fn load_reports(
         loaded = agy_usage::store::load(samples_path)?;
     }
     if loaded.skipped > 0 {
-        eprintln!("warning: skipped {} corrupt lines", loaded.skipped);
+        write_stderr_line(&format!(
+            "warning: skipped {} corrupt lines",
+            loaded.skipped
+        ));
     }
     Ok(forecast::analyze_since(
         loaded.samples,
@@ -205,7 +216,11 @@ fn main() -> Result<()> {
         }
         Commands::UninstallTimer => {
             agy_usage::timer::uninstall()?;
-            println!("uninstalled agy-usage timer");
+            agy_usage::write_line_broken_pipe_safe(
+                "uninstalled agy-usage timer",
+                "failed to write timer output",
+                &mut std::io::stdout(),
+            )?;
         }
         Commands::Collect { no_html } => {
             let data_dir = resolve_data_dir(cli.data_dir)?;
@@ -214,7 +229,7 @@ fn main() -> Result<()> {
             let now = Utc::now();
             let (samples, warnings) = agy_usage::source::parse_usage_with_warnings(&json, now)?;
             for warning in warnings {
-                eprintln!("warning: {warning}");
+                write_stderr_line(&format!("warning: {warning}"));
             }
             if samples.is_empty() {
                 bail!("no enabled quota buckets in agy output");
@@ -222,21 +237,31 @@ fn main() -> Result<()> {
 
             let samples_path = data_dir.join("samples.jsonl");
             agy_usage::store::append(&samples_path, &samples)?;
-            println!("collected {} buckets", samples.len());
+            agy_usage::write_line_broken_pipe_safe(
+                &format!("collected {} buckets", samples.len()),
+                "failed to write collect output",
+                &mut std::io::stdout(),
+            )?;
 
             let retention = chrono::Duration::days(i64::from(retention_days));
             let prune_threshold = now - retention - chrono::Duration::days(1);
             match agy_usage::store::oldest_timestamp(&samples_path) {
                 Ok(Some(oldest)) if oldest <= prune_threshold => {
                     match agy_usage::store::prune(&samples_path, now - retention) {
-                        Ok(n) => eprintln!("pruned {n} samples older than {retention_days} days"),
-                        Err(e) => {
-                            eprintln!("warning: failed to prune {}: {e}", samples_path.display())
-                        }
+                        Ok(n) => write_stderr_line(&format!(
+                            "pruned {n} samples older than {retention_days} days"
+                        )),
+                        Err(e) => write_stderr_line(&format!(
+                            "warning: failed to prune {}: {e}",
+                            samples_path.display()
+                        )),
                     }
                 }
                 Ok(_) => {}
-                Err(e) => eprintln!("warning: failed to inspect {}: {e}", samples_path.display()),
+                Err(e) => write_stderr_line(&format!(
+                    "warning: failed to inspect {}: {e}",
+                    samples_path.display()
+                )),
             }
 
             if !no_html {
@@ -326,7 +351,11 @@ fn main() -> Result<()> {
             let out_path = out.unwrap_or_else(|| data_dir.join("dashboard.html"));
             agy_usage::html::write_atomic(&out_path, &html_content)
                 .with_context(|| format!("failed to write HTML to {}", out_path.display()))?;
-            println!("wrote HTML dashboard to {}", out_path.display());
+            agy_usage::write_line_broken_pipe_safe(
+                &format!("wrote HTML dashboard to {}", out_path.display()),
+                "failed to write html output",
+                &mut std::io::stdout(),
+            )?;
             if open {
                 #[cfg(target_os = "macos")]
                 let opener = "open";
@@ -351,15 +380,22 @@ fn main() -> Result<()> {
                 interval,
             )?;
             #[cfg(target_os = "macos")]
-            println!(
-                "installed and loaded {} launchd agent (every {interval}m)",
-                agy_usage::timer::LAUNCHD_LABEL
-            );
+            agy_usage::write_line_broken_pipe_safe(
+                &format!(
+                    "installed and loaded {} launchd agent (every {interval}m)",
+                    agy_usage::timer::LAUNCHD_LABEL
+                ),
+                "failed to write timer output",
+                &mut std::io::stdout(),
+            )?;
             #[cfg(not(target_os = "macos"))]
-            {
-                println!("installed and started agy-usage.timer (every {interval}m)");
-                println!("Hint: run 'loginctl enable-linger' to collect while logged out");
-            }
+            agy_usage::write_line_broken_pipe_safe(
+                &format!(
+                    "installed and started agy-usage.timer (every {interval}m)\nHint: run 'loginctl enable-linger' to collect while logged out"
+                ),
+                "failed to write timer output",
+                &mut std::io::stdout(),
+            )?;
         }
     }
 
