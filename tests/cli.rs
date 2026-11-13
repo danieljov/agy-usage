@@ -1400,7 +1400,7 @@ fn cli_status_outputs_all_formats_and_handles_empty_or_broken_pipe() {
     let samples = vec![
         agy_usage::model::Sample {
             ts: now - chrono::Duration::minutes(30),
-            group: "Gemini Models".to_string(),
+            group: "Gemini #(id)".to_string(),
             bucket_id: "g-5h".to_string(),
             window: "5h".to_string(),
             remaining: 0.90,
@@ -1409,7 +1409,7 @@ fn cli_status_outputs_all_formats_and_handles_empty_or_broken_pipe() {
         },
         agy_usage::model::Sample {
             ts: now - chrono::Duration::minutes(2),
-            group: "Gemini Models".to_string(),
+            group: "Gemini #(id)".to_string(),
             bucket_id: "g-5h".to_string(),
             window: "5h".to_string(),
             remaining: 0.25,
@@ -1446,19 +1446,14 @@ fn cli_status_outputs_all_formats_and_handles_empty_or_broken_pipe() {
                 let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
                 assert_eq!(v["percentage"], 25);
                 assert_eq!(v["class"], serde_json::json!(["critical"]));
-                assert!(
-                    v["tooltip"]
-                        .as_str()
-                        .unwrap()
-                        .contains("Gemini Models · 5h")
-                );
+                assert!(v["tooltip"].as_str().unwrap().contains("Gemini #(id) · 5h"));
             }
             "tmux" => {
                 assert!(stdout.contains("25%"));
                 assert!(!stdout.contains("#("));
             }
             "oneline" => {
-                assert!(stdout.contains("Gemini Models · 5h: 25%"));
+                assert!(stdout.contains("Gemini #(id) · 5h: 25%"));
             }
             _ => unreachable!(),
         }
@@ -1669,4 +1664,82 @@ fn cli_collect_emits_warning_for_skipped_malformed_enabled_bucket() {
         .map(str::to_string)
         .collect();
     assert_eq!(lines.len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_doctor_and_status_succeed_on_readonly_data_dir_without_lockfile() {
+    let bin_path = env!("CARGO_BIN_EXE_agy-usage");
+    let home_dir = tempdir().unwrap();
+    let data_dir = home_dir.path().join("ro-data");
+    fs::create_dir_all(&data_dir).unwrap();
+
+    let fake_bin_dir = tempdir().unwrap();
+    let fake_agy = fake_bin_dir.path().join("agy");
+    fs::write(&fake_agy, "#!/bin/sh\necho '{}'\n").unwrap();
+    fs::set_permissions(&fake_agy, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let now = chrono::Utc::now();
+    let sample = agy_usage::model::Sample {
+        ts: now - chrono::Duration::minutes(2),
+        group: "Gemini Models".to_string(),
+        bucket_id: "g-5h".to_string(),
+        window: "5h".to_string(),
+        remaining: 0.72,
+        reset_time: Some(now + chrono::Duration::hours(4)),
+        disabled: false,
+    };
+    fs::write(
+        data_dir.join("samples.jsonl"),
+        serde_json::to_string(&sample).unwrap() + "\n",
+    )
+    .unwrap();
+    fs::write(data_dir.join("dashboard.html"), "<html>ok</html>").unwrap();
+    assert!(!data_dir.join("samples.lock").exists());
+
+    fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let status_out = Command::new(bin_path)
+        .args([
+            "--data-dir",
+            &data_dir.display().to_string(),
+            "--clock",
+            "24h",
+            "status",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    let doctor_out = Command::new(bin_path)
+        .args([
+            "--data-dir",
+            &data_dir.display().to_string(),
+            "doctor",
+            "--json",
+        ])
+        .env("HOME", home_dir.path())
+        .env("XDG_CONFIG_HOME", home_dir.path().join(".config"))
+        .env("PATH", fake_bin_dir.path())
+        .env_remove("AGY_BIN")
+        .output()
+        .unwrap();
+
+    fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(
+        status_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status_out.stderr)
+    );
+    let status_json: serde_json::Value = serde_json::from_slice(&status_out.stdout).unwrap();
+    assert_eq!(status_json["buckets"][0]["remaining_pct"], 72.0);
+
+    assert!(
+        doctor_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&doctor_out.stderr)
+    );
+    let doctor_json: serde_json::Value = serde_json::from_slice(&doctor_out.stdout).unwrap();
+    assert_eq!(doctor_json["healthy"], true);
+    assert!(!data_dir.join("samples.lock").exists());
 }

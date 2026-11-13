@@ -36,19 +36,43 @@ impl Drop for LockGuard {
     }
 }
 
-fn lock_sidecar(path: &Path, op: FlockOperation) -> std::io::Result<LockGuard> {
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        fs::create_dir_all(parent)?;
-    }
+fn lock_sidecar(path: &Path, op: FlockOperation) -> std::io::Result<Option<LockGuard>> {
     let lock_path = path.with_extension("lock");
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)?;
-    flock(&file, op).map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
-    Ok(LockGuard { file })
+    match op {
+        FlockOperation::LockExclusive | FlockOperation::NonBlockingLockExclusive => {
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                fs::create_dir_all(parent)?;
+            }
+            let file = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)?;
+            flock(&file, op).map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
+            Ok(Some(LockGuard { file }))
+        }
+        _ => {
+            // Read-only callers must never create or open the sidecar lockfile for writing,
+            // allowing `status`, `doctor`, and read-only mounts to inspect data cleanly.
+            match OpenOptions::new().read(true).open(&lock_path) {
+                Ok(file) => {
+                    flock(&file, op)
+                        .map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
+                    Ok(Some(LockGuard { file }))
+                }
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    Ok(None)
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
 }
 
 /// Timestamp-only view of a stored line, used to discard old lines without
@@ -739,5 +763,38 @@ mod tests {
         assert_eq!(loaded.skipped, 0);
         assert_eq!(loaded.samples, kept);
         assert!(fs::read_to_string(&path).unwrap().ends_with("}\n"));
+    }
+
+    #[test]
+    fn read_operations_never_create_lockfile_and_work_without_lockfile() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("samples.jsonl");
+        let lock_path = path.with_extension("lock");
+        let ts = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
+        let sample = sample_at("b1", ts);
+        let line = serde_json::to_string(&sample).unwrap() + "\n";
+        fs::write(&path, line).unwrap();
+        assert!(!lock_path.exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        }
+
+        let all = load(&path).unwrap();
+        assert_eq!(all.samples, vec![sample.clone()]);
+        let since = load_since(&path, ts - chrono::Duration::hours(1)).unwrap();
+        assert_eq!(since.samples, vec![sample.clone()]);
+        assert_eq!(oldest_timestamp(&path).unwrap(), Some(ts));
+        let inc = load_from(&path, Cursor::default()).unwrap();
+        assert_eq!(inc.loaded.samples, vec![sample]);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(!lock_path.exists(), "readers must not create samples.lock");
     }
 }

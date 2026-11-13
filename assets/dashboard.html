@@ -520,47 +520,69 @@
             '30d': { spanMs: 30 * 86400 * 1000, boundaries: isShort => !isShort }
         };
 
-        function applyCardRange(cardIdx, range) {
-            const state = cardStates[cardIdx];
-            if (!state || !state.chart) return false;
+        function computeRangeBounds(state, range) {
             const {
-                chart,
                 isShort,
                 endMs,
                 lastSampleMs,
                 windowStartMs,
-                fallbackSpanMs,
+                fallbackSpanMs
+            } = state;
+            if (range === 'window') {
+                if (Number.isFinite(windowStartMs)) {
+                    return {
+                        minX: Math.min(windowStartMs, lastSampleMs),
+                        maxX: endMs,
+                        boundariesDisplay: true
+                    };
+                }
+                const maxX = (endMs - fallbackSpanMs <= lastSampleMs) ? endMs : lastSampleMs;
+                return {
+                    minX: maxX - fallbackSpanMs,
+                    maxX,
+                    boundariesDisplay: true
+                };
+            }
+            if (Object.prototype.hasOwnProperty.call(FIXED_RANGES, range)) {
+                const spec = FIXED_RANGES[range];
+                const maxX = (endMs - spec.spanMs <= lastSampleMs) ? endMs : lastSampleMs;
+                return {
+                    minX: maxX - spec.spanMs,
+                    maxX,
+                    boundariesDisplay: spec.boundaries(isShort)
+                };
+            }
+            if (range === 'all') {
+                return {
+                    minX: null,
+                    maxX: endMs,
+                    boundariesDisplay: false
+                };
+            }
+            return null;
+        }
+
+        function applyCardRange(cardIdx, range) {
+            const state = cardStates[cardIdx];
+            if (!state || !state.chart) return false;
+            const bounds = computeRangeBounds(state, range);
+            if (!bounds) return false;
+            const {
+                chart,
                 allActualPts,
                 actualDataset,
                 actualPointRadius,
                 toggleContainer
             } = state;
 
-            let minX = null;
-            if (range === 'window') {
-                const rawWinMin = Number.isFinite(windowStartMs) ? windowStartMs : (endMs - fallbackSpanMs);
-                minX = Math.min(rawWinMin, lastSampleMs);
-                chart.options.scales.x.min = minX;
-                chart.options.scales.x.max = endMs;
-                chart.options.plugins.boundaries.display = true;
-            } else if (Object.prototype.hasOwnProperty.call(FIXED_RANGES, range)) {
-                const spec = FIXED_RANGES[range];
-                if (endMs - spec.spanMs <= lastSampleMs) {
-                    minX = endMs - spec.spanMs;
-                    chart.options.scales.x.max = endMs;
-                } else {
-                    minX = lastSampleMs - spec.spanMs;
-                    chart.options.scales.x.max = lastSampleMs;
-                }
-                chart.options.scales.x.min = minX;
-                chart.options.plugins.boundaries.display = spec.boundaries(isShort);
-            } else if (range === 'all') {
+            const minX = bounds.minX;
+            if (minX === null) {
                 delete chart.options.scales.x.min;
-                chart.options.scales.x.max = endMs;
-                chart.options.plugins.boundaries.display = false;
             } else {
-                return false;
+                chart.options.scales.x.min = minX;
             }
+            chart.options.scales.x.max = bounds.maxX;
+            chart.options.plugins.boundaries.display = bounds.boundariesDisplay;
 
             if (actualDataset) {
                 const visiblePts = sliceSeriesFrom(allActualPts, minX);
@@ -929,12 +951,20 @@
                 const rawLastMs = p.last_sample ? new Date(p.last_sample).getTime() : NaN;
                 const lastSampleMs = !isNaN(rawLastMs) ? rawLastMs : nowMs;
                 const endMs = (!isNaN(resetMs) && resetMs > nowMs) ? resetMs : Math.max(nowMs, lastSampleMs);
-                const rawMin = endMs - (isShort ? 5 * 3600 * 1000 : 7 * 86400 * 1000);
-                const initialMin = Math.min(rawMin, lastSampleMs);
                 const windowStartMs = rep.window_start ? new Date(rep.window_start).getTime() : NaN;
                 const fallbackSpanMs = (rep.window_secs != null && rep.window_secs > 0)
                     ? rep.window_secs * 1000
                     : (isShort ? 5 * 3600 * 1000 : 7 * 86400 * 1000);
+                const initialRange = isShort ? '5h' : '7d';
+                const initialBounds = computeRangeBounds({
+                    isShort,
+                    endMs,
+                    lastSampleMs,
+                    windowStartMs,
+                    fallbackSpanMs
+                }, initialRange);
+                const initialMin = initialBounds.minX;
+                const initialMax = initialBounds.maxX;
 
                 // Actual series
                 const allActualPts = (rep.series || []).map(pt => ({ x: pt[0], y: pt[1] * 100 }));
@@ -1026,7 +1056,7 @@
                                     type: 'time',
                                     time: chartTimeOptions(),
                                     min: initialMin,
-                                    max: endMs,
+                                    max: initialMax,
                                     grid: { color: themeColors.grid },
                                     ticks: { color: themeColors.tick }
                                 },

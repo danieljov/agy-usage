@@ -138,11 +138,7 @@ fn write_completions(shell: Shell, out: &mut impl Write) -> Result<()> {
     let bin_name = cmd.get_name().to_string();
     let mut buf = Vec::new();
     clap_complete::generate(shell, &mut cmd, bin_name, &mut buf);
-    match out.write_all(&buf).and_then(|()| out.flush()) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        Err(e) => Err(e).context("failed to write shell completions to stdout"),
-    }
+    agy_usage::write_broken_pipe_safe(&buf, "failed to write shell completions to stdout", out)
 }
 
 fn effective_retention_days(explicit: Option<u32>, history_days: u32) -> Result<u32> {
@@ -274,7 +270,7 @@ fn main() -> Result<()> {
                     cli.tight_threshold,
                     &agy_bin,
                     clock,
-                    u64::from(cli.history_days),
+                    cli.history_days,
                 )?;
             }
         }

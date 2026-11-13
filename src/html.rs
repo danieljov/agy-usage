@@ -34,11 +34,6 @@ struct DashboardData<'a> {
     reports: Vec<CompactReport<'a>>,
 }
 
-fn round4(v: f64) -> f64 {
-    let r = (v * 10_000.0).round() / 10_000.0;
-    if r == 0.0 { 0.0 } else { r }
-}
-
 /// Compresses a chronological `(timestamp_ms, remaining)` series for HTML
 /// embedding by rounding values to 4 decimal places and collapsing interior
 /// flat plateau points while preserving series endpoints, plateau boundary
@@ -49,7 +44,10 @@ pub fn compress_series(points: &[(i64, f64)]) -> Vec<(i64, f64)> {
         return Vec::new();
     }
 
-    let rounded: Vec<(i64, f64)> = points.iter().map(|&(ts, val)| (ts, round4(val))).collect();
+    let rounded: Vec<(i64, f64)> = points
+        .iter()
+        .map(|&(ts, val)| (ts, crate::model::round4(val)))
+        .collect();
     if rounded.len() <= 2 {
         return rounded;
     }
@@ -492,20 +490,20 @@ mod tests {
         assert!(
             output.contains("const isShort = rep.window_secs != null && rep.window_secs < 86400;")
         );
+        assert!(output.contains("function computeRangeBounds(state, range)"));
         assert!(
-            output.contains("chart.options.plugins.boundaries.display = spec.boundaries(isShort);")
+            output.contains("chart.options.plugins.boundaries.display = bounds.boundariesDisplay;")
         );
 
-        // Window-aware defaults in chart initialization: initial viewport matches active button (5h for short, 7d for long)
+        // Window-aware defaults in chart initialization: initial viewport uses computeRangeBounds (matching 5h/7d toggle)
         assert!(output.contains("\"window_secs\":18000"));
         assert!(output.contains("\"window_secs\":86400"));
         assert!(output.contains("\"window_secs\":604800"));
-        assert!(
-            output
-                .contains("const rawMin = endMs - (isShort ? 5 * 3600 * 1000 : 7 * 86400 * 1000);")
-        );
+        assert!(output.contains("const initialBounds = computeRangeBounds({"));
+        assert!(output.contains("}, initialRange);"));
         assert!(!output.contains("const winMs ="));
-        assert!(output.contains("const initialMin = Math.min(rawMin, lastSampleMs);"));
+        assert!(output.contains("const initialMin = initialBounds.minX;"));
+        assert!(output.contains("const initialMax = initialBounds.maxX;"));
         assert!(
             output.contains("const initialActualPts = sliceSeriesFrom(allActualPts, initialMin);")
         );
@@ -513,7 +511,7 @@ mod tests {
         assert!(output.contains("updateDatasetPoints(actualDataset, visiblePts);"));
         assert!(output.contains("actualDataset.pointRadius = actualPointRadius(visiblePts);"));
         assert!(output.contains("min: initialMin"));
-        assert!(output.contains("max: endMs"));
+        assert!(output.contains("max: initialMax"));
         assert!(output.contains("chart.options.scales.x.min"));
         assert!(output.contains("chart.options.scales.x.max"));
         assert!(output.contains("chart.update('none')"));

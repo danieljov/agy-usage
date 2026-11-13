@@ -6,9 +6,9 @@ use serde::Serialize;
 
 use crate::clock::ClockFormat;
 use crate::forecast::{BucketReport, Status};
+use crate::model::{STALE_THRESHOLD_MINS, round_decimals, round4};
 
 pub const STATUS_SCHEMA_VERSION: u32 = 1;
-pub const STALE_THRESHOLD_MINS: i64 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusFormat {
@@ -55,20 +55,8 @@ struct WaybarPayload {
     percentage: u8,
 }
 
-fn round_decimals(value: f64, factor: f64) -> f64 {
-    if !value.is_finite() {
-        return 0.0;
-    }
-    let rounded = (value * factor).round() / factor;
-    if rounded == 0.0 { 0.0 } else { rounded }
-}
-
 fn round1(value: f64) -> f64 {
     round_decimals(value, 10.0)
-}
-
-fn round4(value: f64) -> f64 {
-    round_decimals(value, 10_000.0)
 }
 
 fn status_severity(status: Status) -> u8 {
@@ -314,15 +302,7 @@ pub fn write_status(
     writer: &mut impl Write,
 ) -> Result<()> {
     let rendered = format_status(out, format)?;
-    match writer
-        .write_all(rendered.as_bytes())
-        .and_then(|()| writer.write_all(b"\n"))
-        .and_then(|()| writer.flush())
-    {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        Err(e) => Err(e).context("failed to write status output"),
-    }
+    crate::write_line_broken_pipe_safe(&rendered, "failed to write status output", writer)
 }
 
 #[cfg(test)]

@@ -768,7 +768,7 @@ fn draw_status_bar(
         let age_secs = (now - ls).num_seconds();
         (
             format!("last sample {}", format_time_ago(ls, now)),
-            age_secs > 15 * 60,
+            age_secs > crate::model::STALE_THRESHOLD_MINS * 60,
         )
     } else {
         ("".to_string(), false)
@@ -1429,11 +1429,10 @@ fn write_dashboard_html(
     data_dir: &Path,
     reports: &[BucketReport],
     now: DateTime<Utc>,
-    history_days: u64,
+    history_days: u32,
     clock: ClockFormat,
 ) -> std::io::Result<PathBuf> {
-    let days = u32::try_from(history_days).unwrap_or(u32::MAX);
-    let rendered = crate::html::render(reports, now, days, clock);
+    let rendered = crate::html::render(reports, now, history_days, clock);
     let html_path = data_dir.join("dashboard.html");
     crate::html::write_atomic(&html_path, &rendered)?;
     Ok(html_path)
@@ -1483,7 +1482,7 @@ fn open_dashboard_with<F>(
     data_dir: &Path,
     reports: &[BucketReport],
     now: DateTime<Utc>,
-    history_days: u64,
+    history_days: u32,
     clock: ClockFormat,
     launcher: F,
 ) -> String
@@ -1508,7 +1507,7 @@ fn open_dashboard(
     data_dir: &Path,
     reports: &[BucketReport],
     now: DateTime<Utc>,
-    history_days: u64,
+    history_days: u32,
     clock: ClockFormat,
 ) -> String {
     open_dashboard_with(data_dir, reports, now, history_days, clock, spawn_browser)
@@ -1523,7 +1522,7 @@ pub fn run_with_history(
     tight: f64,
     agy_bin: &str,
     clock: ClockFormat,
-    history_days: u64,
+    history_days: u32,
 ) -> Result<()> {
     let mut terminal = ratatui::try_init()?;
     let result = (|| -> Result<()> {

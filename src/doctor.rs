@@ -6,12 +6,12 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 
 use crate::clock::ClockFormat;
+use crate::model::STALE_THRESHOLD_MINS;
 use crate::source;
 use crate::store;
 use crate::timer;
 
 pub const DOCTOR_SCHEMA_VERSION: u32 = 1;
-pub const STALE_THRESHOLD_MINS: i64 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -314,15 +314,20 @@ fn extract_launchd_interval(plist: &str) -> Option<u64> {
     rest[..close].trim().parse().ok()
 }
 
-fn check_clock(detected: ClockFormat, desktop_env: Option<&str>) -> DoctorCheck {
-    let de = desktop_env
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or("unset");
+fn check_clock(detected: ClockFormat, desktop_env: Option<&str>, is_macos: bool) -> DoctorCheck {
+    let detail = if is_macos {
+        "source=macOS defaults / locale".to_string()
+    } else {
+        let de = desktop_env
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("unset");
+        format!("XDG_CURRENT_DESKTOP={de}")
+    };
     DoctorCheck {
         name: "clock_detection".to_string(),
         level: CheckLevel::Ok,
         message: format!("auto clock resolved to {}", detected.as_arg()),
-        detail: Some(format!("XDG_CURRENT_DESKTOP={de}")),
+        detail: Some(detail),
     }
 }
 
@@ -334,7 +339,7 @@ pub fn evaluate_checks(ctx: &DoctorContext<'_>) -> DoctorReport {
         check_samples_store(ctx.data_dir, ctx.now),
         check_html_dashboard(ctx.data_dir),
         check_timer(&ctx.timer_dir, ctx.is_macos),
-        check_clock(ctx.detected_clock, ctx.desktop_env.as_deref()),
+        check_clock(ctx.detected_clock, ctx.desktop_env.as_deref(), ctx.is_macos),
     ];
     let healthy = checks.iter().all(|c| c.level != CheckLevel::Fail);
     DoctorReport {
@@ -395,15 +400,7 @@ pub fn write_doctor(report: &DoctorReport, json: bool, writer: &mut impl Write) 
     } else {
         format_doctor_human(report)
     };
-    match writer
-        .write_all(rendered.as_bytes())
-        .and_then(|()| writer.write_all(b"\n"))
-        .and_then(|()| writer.flush())
-    {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        Err(e) => Err(e).context("failed to write doctor output"),
-    }
+    crate::write_line_broken_pipe_safe(&rendered, "failed to write doctor output", writer)
 }
 
 #[cfg(test)]
@@ -473,6 +470,15 @@ mod tests {
         assert!(report.checks.iter().all(|c| c.level == CheckLevel::Ok));
         let timer_check = report.checks.iter().find(|c| c.name == "timer").unwrap();
         assert_eq!(timer_check.detail.as_deref(), Some("OnCalendar=*:0/10"));
+        let clock_check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "clock_detection")
+            .unwrap();
+        assert_eq!(
+            clock_check.detail.as_deref(),
+            Some("XDG_CURRENT_DESKTOP=KDE")
+        );
     }
 
     #[test]
@@ -496,6 +502,15 @@ mod tests {
         assert!(!report.healthy);
         assert_eq!(report.checks[0].level, CheckLevel::Fail);
         assert_eq!(report.checks[1].level, CheckLevel::Fail);
+        let clock_check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "clock_detection")
+            .unwrap();
+        assert_eq!(
+            clock_check.detail.as_deref(),
+            Some("source=macOS defaults / locale")
+        );
         assert!(!timer_dir.exists(), "doctor must remain strictly read-only");
     }
 

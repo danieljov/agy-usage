@@ -1,6 +1,23 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Minutes after which the latest sample is considered stale across status, doctor, and TUI.
+pub const STALE_THRESHOLD_MINS: i64 = 15;
+
+/// Rounds `value` using scaling `factor` (`0.0` normalized cleanly for JSON/UI output).
+pub fn round_decimals(value: f64, factor: f64) -> f64 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+    let rounded = (value * factor).round() / factor;
+    if rounded == 0.0 { 0.0 } else { rounded }
+}
+
+/// Rounds `value` to 4 decimal places (`0.0` normalized cleanly for JSON/UI output).
+pub fn round4(value: f64) -> f64 {
+    round_decimals(value, 10_000.0)
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Sample {
     pub ts: DateTime<Utc>,
