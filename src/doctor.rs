@@ -57,7 +57,19 @@ pub struct DoctorContext<'a> {
     pub now: DateTime<Utc>,
 }
 
+const FUTURE_SKEW_TOLERANCE_SECS: i64 = 60;
+
 fn format_age(delta: Duration) -> String {
+    if delta < Duration::seconds(-FUTURE_SKEW_TOLERANCE_SECS) {
+        let secs = delta.num_seconds().unsigned_abs();
+        return if secs < 3600 {
+            format!("in {}m", secs / 60)
+        } else if secs < 86400 {
+            format!("in {}h {}m", secs / 3600, (secs % 3600) / 60)
+        } else {
+            format!("in {}d", secs / 86400)
+        };
+    }
     let secs = delta.num_seconds().max(0);
     if secs < 60 {
         format!("{secs}s ago")
@@ -134,6 +146,26 @@ fn check_samples_store(
             };
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let lock_path = samples_path.with_extension("lock");
+            match std::fs::symlink_metadata(&lock_path) {
+                Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+                    return DoctorCheck {
+                        name: "samples_store".to_string(),
+                        level: CheckLevel::Fail,
+                        message: format!("{} is not a regular file", lock_path.display()),
+                        detail: None,
+                    };
+                }
+                Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                    return DoctorCheck {
+                        name: "samples_store".to_string(),
+                        level: CheckLevel::Fail,
+                        message: format!("cannot stat {}: {err}", lock_path.display()),
+                        detail: None,
+                    };
+                }
+                Ok(_) | Err(_) => {}
+            }
             return DoctorCheck {
                 name: "samples_store".to_string(),
                 level: CheckLevel::Warn,
@@ -172,7 +204,8 @@ fn check_samples_store(
             Some(ts) => {
                 let age = now.signed_duration_since(ts);
                 let stale = age > stale_threshold;
-                let level = if summary.skipped > 0 || stale {
+                let future_skew = age < Duration::seconds(-FUTURE_SKEW_TOLERANCE_SECS);
+                let level = if summary.skipped > 0 || stale || future_skew {
                     CheckLevel::Warn
                 } else {
                     CheckLevel::Ok
@@ -183,6 +216,11 @@ fn check_samples_store(
                         "latest sample is >{}m old; check background timer",
                         stale_threshold.num_minutes()
                     ));
+                }
+                if future_skew {
+                    notes.push(
+                        "latest sample timestamp is in the future; check system clock".to_string(),
+                    );
                 }
                 if summary.skipped > 0 {
                     notes.push(format!("{} corrupt line(s) skipped", summary.skipped));
@@ -998,5 +1036,89 @@ mod tests {
 
         std::fs::set_permissions(&timer_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::set_permissions(&html_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[test]
+    fn directory_lockfile_fails_doctor_and_future_timestamp_warns() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data_lock_dir");
+        std::fs::create_dir_all(data_dir.join("samples.lock")).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
+        std::fs::write(data_dir.join("samples.jsonl"), "").unwrap();
+
+        let lock_dir_report = evaluate_checks(&DoctorContext {
+            data_dir: &data_dir,
+            agy_resolution: Ok(PathBuf::from("/usr/bin/agy")),
+            timer_dir: Ok(dir.path().join("timers")),
+            detected_clock: ClockFormat::H24,
+            desktop_env: Some("GNOME".to_string()),
+            is_macos: false,
+            now,
+        });
+        assert!(!lock_dir_report.healthy);
+        let store_check = lock_dir_report
+            .checks
+            .iter()
+            .find(|c| c.name == "samples_store")
+            .unwrap();
+        assert_eq!(store_check.level, CheckLevel::Fail);
+
+        // Future timestamp warns with `in Xh Ym`; minor 10s negative drift stays Ok (`0s ago`).
+        let future_dir = dir.path().join("data_future");
+        std::fs::create_dir_all(&future_dir).unwrap();
+        let future_sample = crate::model::Sample {
+            ts: now + Duration::hours(2),
+            group: "Gemini Models".to_string(),
+            bucket_id: "gemini-5h".to_string(),
+            window: "5h".to_string(),
+            remaining: 0.8,
+            reset_time: None,
+            disabled: false,
+        };
+        std::fs::write(
+            future_dir.join("samples.jsonl"),
+            serde_json::to_string(&future_sample).unwrap() + "\n",
+        )
+        .unwrap();
+        let future_check = check_samples_store(&future_dir, now, Duration::minutes(15));
+        assert_eq!(future_check.level, CheckLevel::Warn);
+        assert!(future_check.message.contains("in 2h 0m"));
+        assert!(
+            future_check
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("in the future")
+        );
+
+        let drift_check = check_samples_store(
+            &future_dir,
+            now + Duration::hours(2) - Duration::seconds(10),
+            Duration::minutes(15),
+        );
+        assert_eq!(drift_check.level, CheckLevel::Ok);
+        assert!(drift_check.message.contains("0s ago"));
+
+        // Any future skew > 60s that displays `in Xm` must also warn (no Ok + future age mismatch).
+        let two_min_skew = check_samples_store(
+            &future_dir,
+            now + Duration::hours(2) - Duration::minutes(2),
+            Duration::minutes(15),
+        );
+        assert_eq!(two_min_skew.level, CheckLevel::Warn);
+        assert!(two_min_skew.message.contains("in 2m"));
+
+        #[cfg(unix)]
+        {
+            let sym_dir = dir.path().join("data_lock_symlink");
+            std::fs::create_dir_all(&sym_dir).unwrap();
+            std::os::unix::fs::symlink(
+                dir.path().join("nonexistent_target"),
+                sym_dir.join("samples.lock"),
+            )
+            .unwrap();
+            let sym_check = check_samples_store(&sym_dir, now, Duration::minutes(15));
+            assert_eq!(sym_check.level, CheckLevel::Fail);
+        }
     }
 }

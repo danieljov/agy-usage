@@ -47,3 +47,14 @@ pub fn write_line_broken_pipe_safe(
 ) -> Result<()> {
     write_slices_broken_pipe_safe(&[line.as_bytes(), b"\n"], err_context, writer)
 }
+
+/// Neutralizes ASCII/Unicode line/paragraph separators to `' '` and strips other control characters.
+pub fn sanitize_single_line(s: &str) -> String {
+    s.chars()
+        .filter_map(|c| match c {
+            '\n' | '\r' | '\t' | '\u{0085}' | '\u{2028}' | '\u{2029}' => Some(' '),
+            _ if c.is_control() => None,
+            _ => Some(c),
+        })
+        .collect()
+}

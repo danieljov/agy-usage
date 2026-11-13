@@ -1997,3 +1997,91 @@ fn cli_doctor_human_output_and_unreadable_files() {
         fs::set_permissions(&timer_unit, fs::Permissions::from_mode(0o644)).unwrap();
     }
 }
+
+#[test]
+fn cli_broken_pipe_and_unterminated_append_hardening() {
+    use std::process::Stdio;
+
+    let bin_path = env!("CARGO_BIN_EXE_agy-usage");
+    let root = tempdir().unwrap();
+    let data_dir = root.path().join("data");
+    fs::create_dir_all(&data_dir).unwrap();
+
+    let fake_agy = root.path().join("fake_agy.sh");
+    let fixture_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/usage.json");
+    fs::write(&fake_agy, format!("#!/bin/sh\ncat \"{fixture_path}\"\n")).unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(&fake_agy, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // 1. Seed samples.jsonl with an unterminated corrupt line (`partial:true` without trailing `\n`)
+    //    and confirm `collect` writes cleanly on a new line so all 4 newly collected buckets load.
+    let samples_path = data_dir.join("samples.jsonl");
+    fs::write(
+        &samples_path,
+        r#"{"ts":"2026-11-13T10:00:00Z","partial":true"#,
+    )
+    .unwrap();
+
+    let (pipe_rx, pipe_tx) = std::io::pipe().unwrap();
+    drop(pipe_rx);
+    let collect_pipe = Command::new(bin_path)
+        .args(["--data-dir", &data_dir.display().to_string(), "collect"])
+        .env("AGY_BIN", &fake_agy)
+        .stdout(Stdio::from(pipe_tx))
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        collect_pipe.status.success(),
+        "collect failed on closed stdout pipe: {:?}\nstderr: {}",
+        collect_pipe.status,
+        String::from_utf8_lossy(&collect_pipe.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&collect_pipe.stderr).contains("panicked"),
+        "unexpected panic on collect closed pipe"
+    );
+    assert!(data_dir.join("dashboard.html").exists());
+
+    let loaded = agy_usage::store::load(&samples_path).unwrap();
+    assert_eq!(loaded.skipped, 1);
+    assert_eq!(loaded.samples.len(), 4);
+
+    // 2. Closed stdout pipe on `show --once` and `html` must exit 0 with no panic.
+    let out_html = root.path().join("out.html");
+    for args in [
+        vec![
+            "--data-dir",
+            &data_dir.display().to_string(),
+            "show",
+            "--once",
+        ],
+        vec![
+            "--data-dir",
+            &data_dir.display().to_string(),
+            "html",
+            "--out",
+            &out_html.display().to_string(),
+        ],
+    ] {
+        let (rx, tx) = std::io::pipe().unwrap();
+        drop(rx);
+        let res = Command::new(bin_path)
+            .args(&args)
+            .stdout(Stdio::from(tx))
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&res.stderr);
+        assert!(
+            res.status.success(),
+            "command {args:?} failed on closed pipe: {:?}\nstderr: {stderr}",
+            res.status
+        );
+        assert!(
+            !stderr.contains("panicked"),
+            "command {args:?} panicked on closed pipe: {stderr}"
+        );
+    }
+    assert!(out_html.exists());
+}
