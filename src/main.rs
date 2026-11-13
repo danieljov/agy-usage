@@ -209,7 +209,7 @@ fn main() -> Result<()> {
         }
         Commands::Collect { no_html } => {
             let data_dir = resolve_data_dir(cli.data_dir)?;
-            let agy_bin = agy_usage::source::agy_bin();
+            let agy_bin = agy_usage::source::resolve_agy_bin()?;
             let json = agy_usage::source::fetch(&agy_bin)?;
             let now = Utc::now();
             let (samples, warnings) = agy_usage::source::parse_usage_with_warnings(&json, now)?;
@@ -264,7 +264,8 @@ fn main() -> Result<()> {
             } else {
                 // The interactive TUI loads the full retained history itself (its
                 // "All" range needs it), so nothing is pre-loaded here.
-                let agy_bin = agy_usage::source::agy_bin();
+                let agy_bin = agy_usage::source::resolve_agy_bin()
+                    .unwrap_or_else(|_| agy_usage::source::configured_agy_bin());
                 agy_usage::tui::run_with_history(
                     &data_dir,
                     cli.tight_threshold,

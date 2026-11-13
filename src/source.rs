@@ -54,28 +54,45 @@ fn is_bare_command_name(val: &std::ffi::OsStr) -> bool {
     )
 }
 
+fn resolve_executable(
+    val: &std::ffi::OsStr,
+    path_env: Option<&std::ffi::OsStr>,
+    source_prefix: Option<&str>,
+) -> Result<PathBuf> {
+    if is_bare_command_name(val) {
+        if let Some(found) = find_command_in_path(val, path_env) {
+            return Ok(found);
+        }
+        if let Some(prefix) = source_prefix {
+            bail!(
+                "{prefix} '{}', which could not be found as an executable on PATH",
+                Path::new(val).display()
+            );
+        }
+        bail!(
+            "executable '{}' could not be found on PATH",
+            Path::new(val).display()
+        );
+    }
+    let p = PathBuf::from(val);
+    if is_executable(&p) {
+        return Ok(p);
+    }
+    if let Some(prefix) = source_prefix {
+        bail!(
+            "{prefix} '{}', but it is not an executable file",
+            p.display()
+        );
+    }
+    bail!("'{}' is not an executable file", p.display());
+}
+
 pub fn resolve_agy_bin_os(
     agy_env: Option<&std::ffi::OsStr>,
     path_env: Option<&std::ffi::OsStr>,
 ) -> Result<PathBuf> {
     if let Some(val) = agy_env.filter(|s| !s.is_empty()) {
-        if is_bare_command_name(val) {
-            if let Some(found) = find_command_in_path(val, path_env) {
-                return Ok(found);
-            }
-            bail!(
-                "AGY_BIN is set to '{}', which could not be found as an executable on PATH",
-                Path::new(val).display()
-            );
-        }
-        let p = PathBuf::from(val);
-        if is_executable(&p) {
-            return Ok(p);
-        }
-        bail!(
-            "AGY_BIN is set to '{}', but it is not an executable file",
-            p.display()
-        );
+        return resolve_executable(val, path_env, Some("AGY_BIN is set to"));
     }
     if let Some(found) = find_command_in_path(std::ffi::OsStr::new("agy"), path_env) {
         return Ok(found);
@@ -83,6 +100,14 @@ pub fn resolve_agy_bin_os(
     bail!(
         "could not find executable 'agy' on PATH or via $AGY_BIN. Please ensure agy is installed or set AGY_BIN"
     );
+}
+
+/// Returns the configured `$AGY_BIN` override (as a path) if non-empty, or `"agy"`.
+pub fn configured_agy_bin() -> PathBuf {
+    std::env::var_os("AGY_BIN")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("agy"))
 }
 
 pub fn agy_bin() -> String {
@@ -197,16 +222,19 @@ pub fn parse_usage(json: &str, ts: DateTime<Utc>) -> Result<Vec<Sample>> {
 
 const DEFAULT_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
 
-pub fn fetch(agy_bin: &str) -> Result<String> {
+pub fn fetch<P: AsRef<Path>>(agy_bin: P) -> Result<String> {
     fetch_with_timeout(agy_bin, DEFAULT_FETCH_TIMEOUT)
 }
 
-pub fn fetch_with_timeout(agy_bin: &str, timeout: std::time::Duration) -> Result<String> {
+pub fn fetch_with_timeout<P: AsRef<Path>>(
+    agy_bin: P,
+    timeout: std::time::Duration,
+) -> Result<String> {
     fetch_with_timeout_and_cancel(agy_bin, timeout, None, None)
 }
 
-pub fn fetch_with_timeout_and_cancel(
-    agy_bin: &str,
+pub fn fetch_with_timeout_and_cancel<P: AsRef<Path>>(
+    agy_bin: P,
     timeout: std::time::Duration,
     cancel: Option<&std::sync::atomic::AtomicBool>,
     child_pid: Option<&std::sync::atomic::AtomicU32>,
@@ -217,7 +245,13 @@ pub fn fetch_with_timeout_and_cancel(
         bail!("fetch cancelled");
     }
 
-    let mut cmd = Command::new(agy_bin);
+    let resolved = resolve_executable(
+        agy_bin.as_ref().as_os_str(),
+        std::env::var_os("PATH").as_deref(),
+        None,
+    )?;
+
+    let mut cmd = Command::new(&resolved);
     cmd.args(["-p", "/usage", "--output-format", "json"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -247,8 +281,9 @@ pub fn fetch_with_timeout_and_cancel(
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
                 Err(e) => {
-                    return Err(e)
-                        .with_context(|| format!("failed to execute agy binary: {}", agy_bin));
+                    return Err(e).with_context(|| {
+                        format!("failed to execute agy binary: {}", resolved.display())
+                    });
                 }
             }
         }
@@ -897,5 +932,22 @@ mod tests {
         let res = resolve_agy_bin_from(symlink_bin.to_str(), None).unwrap();
         assert_eq!(res, symlink_bin);
         assert_ne!(res, real_bin);
+    }
+
+    #[test]
+    fn resolve_executable_enforces_absolute_path_lookup_for_bare_names() {
+        let rel = std::ffi::OsStr::new("relative_dir");
+        let err = resolve_executable(
+            std::ffi::OsStr::new("agy-nonexistent-probe"),
+            Some(rel),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("could not be found on PATH"),
+            "unexpected: {err}"
+        );
+        let empty_err = resolve_executable(std::ffi::OsStr::new(""), None, None).unwrap_err();
+        assert!(empty_err.to_string().contains("not an executable file"));
     }
 }

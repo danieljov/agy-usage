@@ -1575,17 +1575,23 @@ fn open_dashboard(
     open_dashboard_with(data_dir, reports, now, history_days, clock, spawn_browser)
 }
 
-pub fn run(data_dir: &Path, tight: f64, agy_bin: &str, clock: ClockFormat) -> Result<()> {
+pub fn run<P: AsRef<Path>>(
+    data_dir: &Path,
+    tight: f64,
+    agy_bin: P,
+    clock: ClockFormat,
+) -> Result<()> {
     run_with_history(data_dir, tight, agy_bin, clock, 30)
 }
 
-pub fn run_with_history(
+pub fn run_with_history<P: AsRef<Path>>(
     data_dir: &Path,
     tight: f64,
-    agy_bin: &str,
+    agy_bin: P,
     clock: ClockFormat,
     history_days: u32,
 ) -> Result<()> {
+    let agy_bin = agy_bin.as_ref();
     let mut terminal = ratatui::try_init()?;
     let result = (|| -> Result<()> {
         let samples_path = data_dir.join("samples.jsonl");
@@ -1723,7 +1729,7 @@ pub fn run_with_history(
                             is_refreshing = true;
                             state.message = Some("Refreshing in background...".to_string());
                             let tx = refresh_tx.clone();
-                            let agy = agy_bin.to_string();
+                            let agy = agy_bin.to_path_buf();
                             let sp = samples_path.clone();
                             let thread_cancel = cancel_flag.clone();
                             let thread_child_pid = child_pid.clone();

@@ -198,6 +198,46 @@ fn cli_validations() {
         "expected PATH not found error, got: {}",
         stderr_emptypath
     );
+
+    // 7. `collect` enforces the same absolute-PATH and $AGY_BIN validation as `install-timer`/`doctor`
+    let sentinel = run_dir.path().join("executed_local_agy");
+    fs::write(
+        &local_agy,
+        format!("#!/bin/sh\ntouch \"{}\"\necho '{{}}'\n", sentinel.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&local_agy, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let collect_rel_out = Command::new(bin_path)
+        .current_dir(run_dir.path())
+        .env_remove("AGY_BIN")
+        .env("PATH", "::.:./bin:/nonexistent::")
+        .args(["--data-dir", &dir.path().display().to_string(), "collect"])
+        .output()
+        .expect("failed to run agy-usage collect");
+    assert!(!collect_rel_out.status.success());
+    assert!(
+        !sentinel.exists(),
+        "collect must never execute ./agy from empty/relative PATH entries"
+    );
+    let stderr_collect_rel = String::from_utf8_lossy(&collect_rel_out.stderr);
+    assert!(
+        stderr_collect_rel.contains("could not find executable 'agy' on PATH"),
+        "expected PATH error, got: {stderr_collect_rel}"
+    );
+
+    let collect_bad_env = Command::new(bin_path)
+        .env("AGY_BIN", &non_exec_file)
+        .env("PATH", &valid_path_dir)
+        .args(["--data-dir", &dir.path().display().to_string(), "collect"])
+        .output()
+        .expect("failed to run agy-usage collect");
+    assert!(!collect_bad_env.status.success());
+    let stderr_collect_env = String::from_utf8_lossy(&collect_bad_env.stderr);
+    assert!(
+        stderr_collect_env.contains("AGY_BIN is set to"),
+        "expected AGY_BIN error, got: {stderr_collect_env}"
+    );
 }
 
 fn run_html(data: &std::path::Path, extra: &[&str]) -> std::process::Output {
