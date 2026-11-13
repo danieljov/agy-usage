@@ -31,7 +31,7 @@ pub fn resolve_agy_bin_from(agy_env: Option<&str>, path_env: Option<&str>) -> Re
     }
     if let Some(path_var) = path_env {
         for dir in std::env::split_paths(path_var) {
-            if dir.as_os_str().is_empty() {
+            if !dir.is_absolute() {
                 continue;
             }
             let candidate = dir.join("agy");
@@ -52,7 +52,10 @@ pub fn agy_bin() -> String {
         .unwrap_or_else(|| "agy".to_string())
 }
 
-pub fn parse_usage(json: &str, ts: DateTime<Utc>) -> Result<Vec<Sample>> {
+pub fn parse_usage_with_warnings(
+    json: &str,
+    ts: DateTime<Utc>,
+) -> Result<(Vec<Sample>, Vec<String>)> {
     let root: Value = serde_json::from_str(json).context("invalid JSON")?;
     let groups = root
         .pointer("/command/data/groups")
@@ -60,6 +63,7 @@ pub fn parse_usage(json: &str, ts: DateTime<Utc>) -> Result<Vec<Sample>> {
         .ok_or_else(|| anyhow!("missing command.data.groups in usage JSON"))?;
 
     let mut samples = Vec::new();
+    let mut warnings = Vec::new();
 
     for group in groups {
         let group_name = group
@@ -105,14 +109,30 @@ pub fn parse_usage(json: &str, ts: DateTime<Utc>) -> Result<Vec<Sample>> {
                     continue;
                 }
 
-                let remaining = match remaining_opt {
-                    Some(r) => r,
-                    None => continue,
-                };
-
-                let reset_time = match reset_time {
-                    Some(rt) => rt,
-                    None => continue,
+                let (remaining, reset_time) = match (remaining_opt, reset_time) {
+                    (Some(r), Some(rt)) => (r, rt),
+                    (r, rt) => {
+                        let reason = match (r.is_none(), rt.is_none()) {
+                            (true, true) => "missing or invalid remaining_fraction and reset_time",
+                            (true, false) => "missing or invalid remaining_fraction",
+                            (false, true) => "missing or invalid reset_time",
+                            (false, false) => "invalid bucket fields",
+                        };
+                        let bucket_label = if bucket_id.is_empty() {
+                            "<unknown>"
+                        } else {
+                            bucket_id
+                        };
+                        let group_label = if group_name.is_empty() {
+                            "<unknown>"
+                        } else {
+                            group_name
+                        };
+                        warnings.push(format!(
+                            "skipped bucket '{bucket_label}' in group '{group_label}': {reason}"
+                        ));
+                        continue;
+                    }
                 };
 
                 samples.push(Sample {
@@ -128,7 +148,11 @@ pub fn parse_usage(json: &str, ts: DateTime<Utc>) -> Result<Vec<Sample>> {
         }
     }
 
-    Ok(samples)
+    Ok((samples, warnings))
+}
+
+pub fn parse_usage(json: &str, ts: DateTime<Utc>) -> Result<Vec<Sample>> {
+    Ok(parse_usage_with_warnings(json, ts)?.0)
 }
 
 const DEFAULT_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
@@ -676,6 +700,115 @@ mod tests {
         assert!(res.is_err());
         let err = res.unwrap_err().to_string();
         assert!(err.contains("could not find executable 'agy' on PATH"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_agy_bin_skips_non_absolute_path_elements() {
+        let temp = tempfile::tempdir().unwrap();
+        let pwd_bin = temp.path().join("agy");
+        std::fs::write(&pwd_bin, "#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&pwd_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Relative PATH elements (like "." or "../../../tmp/...") must be skipped even
+        // when they point to an existing executable 'agy'.
+        let cwd = std::env::current_dir().unwrap();
+        let mut rel_to_temp = PathBuf::new();
+        for _ in 0..cwd.components().count().saturating_sub(1) {
+            rel_to_temp.push("..");
+        }
+        for comp in temp.path().components().skip(1) {
+            rel_to_temp.push(comp);
+        }
+        assert!(
+            !rel_to_temp.is_absolute() && is_executable(&rel_to_temp.join("agy")),
+            "sanity check: relative path points to executable agy"
+        );
+
+        let path_with_rel = format!(":.:./bin:rel:{}:/nonexistent_dir::", rel_to_temp.display());
+        let res = resolve_agy_bin_from(None, Some(&path_with_rel));
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("could not find executable 'agy' on PATH"));
+
+        // Negative boundary: adding the absolute path resolves cleanly even after relative entries.
+        let path_with_abs = format!(":.:{}:{}", rel_to_temp.display(), temp.path().display());
+        let resolved = resolve_agy_bin_from(None, Some(&path_with_abs)).unwrap();
+        assert_eq!(resolved, pwd_bin);
+    }
+
+    #[test]
+    fn parse_usage_with_warnings_emits_only_for_skipped_enabled_buckets() {
+        let ts = Utc.with_ymd_and_hms(2026, 10, 12, 13, 35, 0).unwrap();
+
+        // Valid fixtures emit zero warnings.
+        let (pro_samples, pro_warnings) = parse_usage_with_warnings(PRO_FIXTURE_JSON, ts).unwrap();
+        assert_eq!(pro_samples.len(), 5);
+        assert!(pro_warnings.is_empty());
+
+        // Disabled buckets with missing remaining_fraction or reset_time emit zero warnings,
+        // whereas non-disabled buckets missing remaining_fraction and/or reset_time warn once each.
+        let json = r#"{
+            "status": "SUCCESS",
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "Test Group",
+                            "buckets": [
+                                {
+                                    "id": "valid-weekly",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.75,
+                                    "reset_time": "2026-10-16T20:52:27Z"
+                                },
+                                {
+                                    "id": "explicit-disabled",
+                                    "window": "5h",
+                                    "disabled": true
+                                },
+                                {
+                                    "id": "missing-rem",
+                                    "window": "5h",
+                                    "reset_time": "2026-10-16T20:52:27Z"
+                                },
+                                {
+                                    "id": "bad-reset",
+                                    "window": "5h",
+                                    "remaining_fraction": 0.5,
+                                    "reset_time": "not-rfc3339"
+                                },
+                                {
+                                    "id": "missing-both",
+                                    "window": "5h"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }"#;
+
+        let (samples, warnings) = parse_usage_with_warnings(json, ts).unwrap();
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].bucket_id, "valid-weekly");
+        assert!(!samples[0].disabled);
+        assert_eq!(samples[1].bucket_id, "explicit-disabled");
+        assert!(samples[1].disabled);
+
+        assert_eq!(warnings.len(), 3, "unexpected warnings: {warnings:?}");
+        assert!(warnings[0].contains("missing-rem") && warnings[0].contains("remaining_fraction"));
+        assert!(warnings[1].contains("bad-reset") && warnings[1].contains("reset_time"));
+        assert!(
+            warnings[2].contains("missing-both")
+                && warnings[2].contains("remaining_fraction")
+                && warnings[2].contains("reset_time")
+        );
+
+        // parse_usage preserves exact samples and stays quiet.
+        assert_eq!(parse_usage(json, ts).unwrap(), samples);
     }
 
     #[test]

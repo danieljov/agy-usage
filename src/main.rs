@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use agy_usage::clock::ClockFormat;
+use agy_usage::status::StatusFormat;
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
@@ -30,7 +31,8 @@ struct Cli {
 
     /// Clock format for displayed times
     ///
-    /// `auto` follows the GNOME clock setting, then the LC_TIME locale, then 24h.
+    /// `auto` follows the desktop/OS clock setting (gsettings on GNOME, defaults on macOS),
+    /// then the LC_TIME locale, then 24h.
     #[arg(long, global = true, value_enum, default_value_t = ClockArg::Auto)]
     clock: ClockArg,
 
@@ -62,6 +64,25 @@ impl ClockArg {
     }
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum StatusFormatArg {
+    Oneline,
+    Waybar,
+    Tmux,
+    Json,
+}
+
+impl From<StatusFormatArg> for StatusFormat {
+    fn from(arg: StatusFormatArg) -> Self {
+        match arg {
+            StatusFormatArg::Oneline => StatusFormat::Oneline,
+            StatusFormatArg::Waybar => StatusFormat::Waybar,
+            StatusFormatArg::Tmux => StatusFormat::Tmux,
+            StatusFormatArg::Json => StatusFormat::Json,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Collect quota samples from agy and update dashboard
@@ -74,6 +95,21 @@ enum Commands {
         #[arg(long)]
         once: bool,
     },
+    /// Print compact read-only quota status (ideal for Waybar, tmux, and scripts)
+    Status {
+        /// Output machine-readable JSON (shorthand for `--format json`)
+        #[arg(long, conflicts_with = "format")]
+        json: bool,
+        /// Output format [default: oneline]
+        #[arg(long, value_enum)]
+        format: Option<StatusFormatArg>,
+    },
+    /// Run read-only diagnostics on binary, storage, timer, and clock configuration
+    Doctor {
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate HTML dashboard
     Html {
         #[arg(long)]
@@ -82,7 +118,11 @@ enum Commands {
         out: Option<PathBuf>,
     },
     /// Install background collection timer (systemd on Linux, launchd on macOS)
-    InstallTimer,
+    InstallTimer {
+        /// Collection cadence in minutes (must divide 60: 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, 60)
+        #[arg(long, value_name = "MINUTES", default_value_t = agy_usage::timer::DEFAULT_INTERVAL_MINUTES)]
+        interval: u16,
+    },
     /// Uninstall background collection timer
     UninstallTimer,
     /// Generate shell completion scripts
@@ -132,28 +172,6 @@ fn resolve_data_dir(data_dir: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-fn write_html_atomic(path: &Path, content: &str) -> Result<()> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| format!("failed to create temporary file in {}", parent.display()))?;
-    temp.write_all(content.as_bytes())
-        .with_context(|| "failed to write html content to temporary file")?;
-    temp.flush()
-        .with_context(|| "failed to flush temporary file")?;
-    temp.persist(path).map_err(|e| {
-        anyhow::anyhow!(
-            "failed to persist temporary file to {}: {}",
-            path.display(),
-            e.error
-        )
-    })?;
-    Ok(())
-}
-
 /// Loads only the samples needed to display `history_days` of history (see
 /// [`agy_usage::forecast::analysis_cutoff`]) and analyzes them. Falls back to the full
 /// history when a bucket sampled since the cutoff has a window of unknown length, whose
@@ -198,7 +216,10 @@ fn main() -> Result<()> {
             let agy_bin = agy_usage::source::agy_bin();
             let json = agy_usage::source::fetch(&agy_bin)?;
             let now = Utc::now();
-            let samples = agy_usage::source::parse_usage(&json, now)?;
+            let (samples, warnings) = agy_usage::source::parse_usage_with_warnings(&json, now)?;
+            for warning in warnings {
+                eprintln!("warning: {warning}");
+            }
             if samples.is_empty() {
                 bail!("no enabled quota buckets in agy output");
             }
@@ -227,7 +248,9 @@ fn main() -> Result<()> {
                     load_reports(&samples_path, now, cli.history_days, cli.tight_threshold)?;
                 let html_content =
                     agy_usage::html::render(&reports, now, cli.history_days, cli.clock.resolve());
-                write_html_atomic(&data_dir.join("dashboard.html"), &html_content)?;
+                let html_path = data_dir.join("dashboard.html");
+                agy_usage::html::write_atomic(&html_path, &html_content)
+                    .with_context(|| format!("failed to write HTML to {}", html_path.display()))?;
             }
         }
         Commands::Show { once } => {
@@ -246,7 +269,37 @@ fn main() -> Result<()> {
                 // The interactive TUI loads the full retained history itself (its
                 // "All" range needs it), so nothing is pre-loaded here.
                 let agy_bin = agy_usage::source::agy_bin();
-                agy_usage::tui::run(&data_dir, cli.tight_threshold, &agy_bin, clock)?;
+                agy_usage::tui::run_with_history(
+                    &data_dir,
+                    cli.tight_threshold,
+                    &agy_bin,
+                    clock,
+                    u64::from(cli.history_days),
+                )?;
+            }
+        }
+        Commands::Status { json, format } => {
+            let data_dir = resolve_data_dir(cli.data_dir)?;
+            let now = Utc::now();
+            let clock = cli.clock.resolve();
+            let fmt = if json {
+                StatusFormat::Json
+            } else {
+                format.map(Into::into).unwrap_or(StatusFormat::Oneline)
+            };
+            // `status` uses a bounded 0-day history (plus 8-day margin) for sub-ms latency.
+            let reports =
+                load_reports(&data_dir.join("samples.jsonl"), now, 0, cli.tight_threshold)?;
+            let output = agy_usage::status::build_status(&reports, now, clock);
+            agy_usage::status::write_status(&output, fmt, &mut std::io::stdout())?;
+        }
+        Commands::Doctor { json } => {
+            let data_dir = resolve_data_dir(cli.data_dir)?;
+            let now = Utc::now();
+            let report = agy_usage::doctor::run_doctor(&data_dir, now);
+            agy_usage::doctor::write_doctor(&report, json, &mut std::io::stdout())?;
+            if !report.healthy {
+                bail!("doctor found one or more failing checks");
             }
         }
         Commands::Html { open, out } => {
@@ -261,7 +314,8 @@ fn main() -> Result<()> {
             let html_content =
                 agy_usage::html::render(&reports, now, cli.history_days, cli.clock.resolve());
             let out_path = out.unwrap_or_else(|| data_dir.join("dashboard.html"));
-            write_html_atomic(&out_path, &html_content)?;
+            agy_usage::html::write_atomic(&out_path, &html_content)
+                .with_context(|| format!("failed to write HTML to {}", out_path.display()))?;
             println!("wrote HTML dashboard to {}", out_path.display());
             if open {
                 #[cfg(target_os = "macos")]
@@ -271,11 +325,12 @@ fn main() -> Result<()> {
                 let _ = Command::new(opener).arg(&out_path).status();
             }
         }
-        Commands::InstallTimer => {
+        Commands::InstallTimer { interval } => {
+            agy_usage::timer::validate_interval_minutes(interval)?;
             let data_dir = resolve_data_dir(cli.data_dir)?;
             let exe = std::env::current_exe()?;
             let agy_bin = agy_usage::source::resolve_agy_bin()?;
-            agy_usage::timer::install(
+            agy_usage::timer::install_with_interval(
                 &exe,
                 &agy_bin,
                 &data_dir,
@@ -283,15 +338,16 @@ fn main() -> Result<()> {
                 cli.history_days,
                 retention_days,
                 cli.clock.explicit(),
+                interval,
             )?;
             #[cfg(target_os = "macos")]
             println!(
-                "installed and loaded {} launchd agent",
+                "installed and loaded {} launchd agent (every {interval}m)",
                 agy_usage::timer::LAUNCHD_LABEL
             );
             #[cfg(not(target_os = "macos"))]
             {
-                println!("installed and started agy-usage.timer");
+                println!("installed and started agy-usage.timer (every {interval}m)");
                 println!("Hint: run 'loginctl enable-linger' to collect while logged out");
             }
         }

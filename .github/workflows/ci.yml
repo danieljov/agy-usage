@@ -2,16 +2,22 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    branches: ["main"]
   pull_request:
-    branches: ["**"]
+    branches: ["main"]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check-and-test:
     name: Check & Test
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
 
     steps:
@@ -37,6 +43,7 @@ jobs:
 
   msrv:
     name: MSRV (1.88)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
 
     steps:
@@ -50,6 +57,26 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Check and test with MSRV
+        run: |
+          cargo check --locked --all-targets
+          cargo test --locked
+
+  macos:
+    name: Check & Test (macOS)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check and test on macOS
         run: |
           cargo check --locked --all-targets
           cargo test --locked

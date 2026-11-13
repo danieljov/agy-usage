@@ -248,6 +248,7 @@ fn run_html_with_path(data: &std::path::Path, path_env: &std::path::Path) -> Str
         .args(["--data-dir", &data.display().to_string()])
         .args(["html", "--out", &out_file.display().to_string()])
         .env("PATH", path_env)
+        .env_remove("XDG_CURRENT_DESKTOP")
         .output()
         .unwrap();
     html_clock(&out, data)
@@ -271,6 +272,7 @@ fn cli_clock_auto_falls_back_to_24h_without_probes() {
     assert_eq!(run_html_with_path(dir.path(), empty_bin.path()), "24h");
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn cli_clock_auto_prefers_desktop_setting_over_locale() {
     let dir = tempdir().unwrap();
@@ -283,6 +285,35 @@ fn cli_clock_auto_prefers_desktop_setting_over_locale() {
     );
     fake_probe(bin.path(), "locale", "t_fmt", "%T");
     assert_eq!(run_html_with_path(dir.path(), bin.path()), "12h");
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn cli_clock_auto_gates_gsettings_by_desktop_env() {
+    let dir = tempdir().unwrap();
+    let bin = tempdir().unwrap();
+    fake_probe(
+        bin.path(),
+        "gsettings",
+        "get org.gnome.desktop.interface clock-format",
+        "'12h'",
+    );
+    fake_probe(bin.path(), "locale", "t_fmt", "%T");
+
+    let run_with_de = |de: &str| {
+        let out_file = dir.path().join("out.html");
+        let out = Command::new(env!("CARGO_BIN_EXE_agy-usage"))
+            .args(["--data-dir", &dir.path().display().to_string()])
+            .args(["html", "--out", &out_file.display().to_string()])
+            .env("PATH", bin.path())
+            .env("XDG_CURRENT_DESKTOP", de)
+            .output()
+            .unwrap();
+        html_clock(&out, dir.path())
+    };
+
+    assert_eq!(run_with_de("GNOME"), "12h");
+    assert_eq!(run_with_de("KDE"), "24h");
 }
 
 #[test]
@@ -967,8 +998,11 @@ fn cli_completions_subcommand() {
             "agy-usage",
             "collect",
             "show",
+            "status",
+            "doctor",
             "html",
             "install-timer",
+            "interval",
             "uninstall-timer",
             "completions",
             "data-dir",
@@ -1314,4 +1348,325 @@ fn cli_html_uses_full_history_for_unknown_window_buckets() {
     // The displayed series is still limited to --history-days.
     let series = rep["series"].as_array().unwrap();
     assert!(series.len() <= 7 * 24 + 1, "{}", series.len());
+}
+
+#[test]
+fn cli_status_outputs_all_formats_and_handles_empty_or_broken_pipe() {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let bin_path = env!("CARGO_BIN_EXE_agy-usage");
+    let empty_dir = tempdir().unwrap();
+
+    // 1. Empty directory produces valid stale Collecting status without failing
+    let empty_json = Command::new(bin_path)
+        .args([
+            "--data-dir",
+            &empty_dir.path().display().to_string(),
+            "--clock",
+            "24h",
+            "status",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(empty_json.status.success());
+    let parsed_empty: serde_json::Value = serde_json::from_slice(&empty_json.stdout).unwrap();
+    assert_eq!(parsed_empty["schema_version"], 1);
+    assert_eq!(parsed_empty["stale"], true);
+    assert_eq!(parsed_empty["worst_status"], "Collecting");
+    assert_eq!(parsed_empty["buckets"].as_array().unwrap().len(), 0);
+
+    let empty_line = Command::new(bin_path)
+        .args([
+            "--data-dir",
+            &empty_dir.path().display().to_string(),
+            "--clock",
+            "24h",
+            "status",
+        ])
+        .output()
+        .unwrap();
+    assert!(empty_line.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&empty_line.stdout).trim(),
+        "agy: no samples"
+    );
+
+    // 2. Populated samples: test JSON, waybar, tmux, oneline
+    let pop_dir = tempdir().unwrap();
+    let now = chrono::Utc::now();
+    let reset = now + chrono::Duration::hours(4);
+    let samples = vec![
+        agy_usage::model::Sample {
+            ts: now - chrono::Duration::minutes(30),
+            group: "Gemini Models".to_string(),
+            bucket_id: "g-5h".to_string(),
+            window: "5h".to_string(),
+            remaining: 0.90,
+            reset_time: Some(reset),
+            disabled: false,
+        },
+        agy_usage::model::Sample {
+            ts: now - chrono::Duration::minutes(2),
+            group: "Gemini Models".to_string(),
+            bucket_id: "g-5h".to_string(),
+            window: "5h".to_string(),
+            remaining: 0.25,
+            reset_time: Some(reset),
+            disabled: false,
+        },
+    ];
+    agy_usage::store::append(&pop_dir.path().join("samples.jsonl"), &samples).unwrap();
+
+    for format in ["oneline", "tmux", "waybar", "json"] {
+        let out = Command::new(bin_path)
+            .args([
+                "--data-dir",
+                &pop_dir.path().display().to_string(),
+                "--clock",
+                "24h",
+                "status",
+                "--format",
+                format,
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "format {format} failed");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        match format {
+            "json" => {
+                let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+                assert_eq!(v["schema_version"], 1);
+                assert_eq!(v["stale"], false);
+                assert_eq!(v["worst_status"], "WillRunOut");
+                assert_eq!(v["buckets"][0]["remaining_pct"], 25.0);
+            }
+            "waybar" => {
+                let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+                assert_eq!(v["percentage"], 25);
+                assert_eq!(v["class"], serde_json::json!(["critical"]));
+                assert!(
+                    v["tooltip"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Gemini Models · 5h")
+                );
+            }
+            "tmux" => {
+                assert!(stdout.contains("25%"));
+                assert!(!stdout.contains("#("));
+            }
+            "oneline" => {
+                assert!(stdout.contains("Gemini Models · 5h: 25%"));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    // 3. Conflicting --json and --format flags rejected cleanly
+    let conflict = Command::new(bin_path)
+        .args([
+            "--data-dir",
+            &pop_dir.path().display().to_string(),
+            "status",
+            "--json",
+            "--format",
+            "tmux",
+        ])
+        .output()
+        .unwrap();
+    assert!(!conflict.status.success());
+
+    // 4. BrokenPipe exits 0 with empty stderr
+    let mut child = Command::new(bin_path)
+        .args([
+            "--data-dir",
+            &pop_dir.path().display().to_string(),
+            "--clock",
+            "24h",
+            "status",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut stdout = child.stdout.take().unwrap();
+        let mut byte = [0u8; 1];
+        stdout.read_exact(&mut byte).unwrap();
+    }
+    let pipe_out = child.wait_with_output().unwrap();
+    assert!(pipe_out.status.success());
+    assert!(pipe_out.stderr.is_empty());
+}
+
+#[test]
+fn cli_doctor_reports_health_and_exits_nonzero_on_failure() {
+    let bin_path = env!("CARGO_BIN_EXE_agy-usage");
+    let home_dir = tempdir().unwrap();
+    let data_dir = home_dir.path().join("data");
+    fs::create_dir_all(&data_dir).unwrap();
+
+    let fake_bin_dir = tempdir().unwrap();
+    let fake_agy = fake_bin_dir.path().join("agy");
+    fs::write(&fake_agy, "#!/bin/sh\necho '{}'\n").unwrap();
+    fs::set_permissions(&fake_agy, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let now = chrono::Utc::now();
+    agy_usage::store::append(
+        &data_dir.join("samples.jsonl"),
+        &[agy_usage::model::Sample {
+            ts: now - chrono::Duration::minutes(2),
+            group: "Gemini Models".to_string(),
+            bucket_id: "g-5h".to_string(),
+            window: "5h".to_string(),
+            remaining: 0.85,
+            reset_time: Some(now + chrono::Duration::hours(4)),
+            disabled: false,
+        }],
+    )
+    .unwrap();
+    fs::write(data_dir.join("dashboard.html"), "<html>ok</html>").unwrap();
+
+    let ok_out = Command::new(bin_path)
+        .args([
+            "--data-dir",
+            &data_dir.display().to_string(),
+            "doctor",
+            "--json",
+        ])
+        .env("HOME", home_dir.path())
+        .env("XDG_CONFIG_HOME", home_dir.path().join(".config"))
+        .env("PATH", fake_bin_dir.path())
+        .env_remove("AGY_BIN")
+        .output()
+        .unwrap();
+    assert!(
+        ok_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok_out.stderr)
+    );
+    let ok_json: serde_json::Value = serde_json::from_slice(&ok_out.stdout).unwrap();
+    assert_eq!(ok_json["schema_version"], 1);
+    assert_eq!(ok_json["healthy"], true);
+
+    // Missing `agy` binary & non-existent data_dir -> unhealthy exit non-zero, still read-only!
+    let missing_data = home_dir.path().join("never-created");
+    let empty_path = tempdir().unwrap();
+    let fail_out = Command::new(bin_path)
+        .args([
+            "--data-dir",
+            &missing_data.display().to_string(),
+            "doctor",
+            "--json",
+        ])
+        .env("HOME", home_dir.path())
+        .env("XDG_CONFIG_HOME", home_dir.path().join(".config"))
+        .env("PATH", empty_path.path())
+        .env_remove("AGY_BIN")
+        .output()
+        .unwrap();
+    assert!(!fail_out.status.success());
+    assert!(
+        !missing_data.exists(),
+        "doctor must not create missing data_dir"
+    );
+    let fail_json: serde_json::Value = serde_json::from_slice(&fail_out.stdout).unwrap();
+    assert_eq!(fail_json["healthy"], false);
+    assert_eq!(fail_json["checks"][0]["name"], "agy_binary");
+    assert_eq!(fail_json["checks"][0]["level"], "fail");
+}
+
+#[test]
+fn cli_install_timer_validates_interval_minutes_fast() {
+    let bin_path = env!("CARGO_BIN_EXE_agy-usage");
+    let home_dir = tempdir().unwrap();
+    let empty_path = tempdir().unwrap();
+    let bad = Command::new(bin_path)
+        .args([
+            "--data-dir",
+            &home_dir.path().join("data").display().to_string(),
+            "install-timer",
+            "--interval",
+            "7",
+        ])
+        .env("HOME", home_dir.path())
+        .env("XDG_CONFIG_HOME", home_dir.path().join(".config"))
+        .env("PATH", empty_path.path())
+        .env_remove("AGY_BIN")
+        .output()
+        .unwrap();
+    assert!(!bad.status.success());
+    let stderr = String::from_utf8_lossy(&bad.stderr);
+    assert!(
+        stderr.contains("invalid collection interval 7"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        !home_dir.path().join(".config").exists(),
+        "invalid interval must fail before creating timer directories"
+    );
+}
+
+#[test]
+fn cli_collect_emits_warning_for_skipped_malformed_enabled_bucket() {
+    let bin_path = env!("CARGO_BIN_EXE_agy-usage");
+    let script_dir = tempdir().unwrap();
+    let data_dir = tempdir().unwrap();
+    let fake_agy = script_dir.path().join("fake_agy_warn.sh");
+    let payload = r#"{
+      "status": "SUCCESS",
+      "command": {
+        "name": "usage",
+        "data": {
+          "groups": [
+            {
+              "name": "Gemini",
+              "buckets": [
+                { "id": "valid-5h", "window": "5h", "remaining_fraction": 0.8, "reset_time": "2099-01-01T00:00:00Z" },
+                { "id": "broken-5h", "window": "5h", "remaining_fraction": null, "reset_time": null }
+              ]
+            }
+          ]
+        }
+      }
+    }"#;
+    let payload_file = script_dir.path().join("payload.json");
+    fs::write(&payload_file, payload).unwrap();
+    fs::write(
+        &fake_agy,
+        format!("#!/bin/sh\ncat \"{}\"\n", payload_file.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_agy, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out = Command::new(bin_path)
+        .args([
+            "--data-dir",
+            &data_dir.path().display().to_string(),
+            "--clock",
+            "24h",
+            "collect",
+        ])
+        .env("AGY_BIN", &fake_agy)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("warning:") && stderr.contains("broken-5h"),
+        "expected warning for broken-5h in stderr, got: {stderr}"
+    );
+    let lines: Vec<_> = fs::read_to_string(data_dir.path().join("samples.jsonl"))
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(lines.len(), 1);
 }

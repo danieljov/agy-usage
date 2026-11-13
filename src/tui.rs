@@ -1,12 +1,13 @@
+use std::ffi::OsString;
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration as StdDuration, Instant};
 
 use anyhow::Result;
 use chrono::{DateTime, Local, TimeZone, Utc};
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::Marker;
 use ratatui::text::{Line, Span};
@@ -37,6 +38,16 @@ impl TimeRange {
             TimeRange::D7 => TimeRange::D30,
             TimeRange::D30 => TimeRange::All,
             TimeRange::All => TimeRange::Window,
+        }
+    }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            TimeRange::Window => TimeRange::All,
+            TimeRange::H24 => TimeRange::Window,
+            TimeRange::D7 => TimeRange::H24,
+            TimeRange::D30 => TimeRange::D7,
+            TimeRange::All => TimeRange::D30,
         }
     }
 
@@ -396,6 +407,40 @@ fn projection_points(rep: &BucketReport, reset_time: DateTime<Utc>) -> Vec<(f64,
     proj_pts
 }
 
+fn format_axis_ts_with_tz<Tz: TimeZone>(
+    ts_secs: f64,
+    span_secs: f64,
+    area_width: u16,
+    clock: ClockFormat,
+    tz: &Tz,
+) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    if !ts_secs.is_finite() || !(-8.0e12..=8.0e12).contains(&ts_secs) {
+        return String::new();
+    }
+    let Some(utc_dt) = DateTime::from_timestamp(ts_secs.round() as i64, 0) else {
+        return String::new();
+    };
+    let local_dt = utc_dt.with_timezone(tz);
+    if span_secs <= 86_400.0 {
+        clock.format_time(&local_dt)
+    } else {
+        let pattern = match clock {
+            ClockFormat::H24 => "%m-%d %H:%M",
+            ClockFormat::H12 => {
+                if area_width >= 56 {
+                    "%m-%d %I:%M %p"
+                } else {
+                    "%m-%d %I%p"
+                }
+            }
+        };
+        local_dt.format(pattern).to_string()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_chart(
     frame: &mut Frame,
@@ -502,12 +547,31 @@ fn draw_chart(
         .map(|&bx| [(bx, 0.0), (bx, 100.0)])
         .collect();
 
-    let x_axis = Axis::default()
+    let mut x_axis = Axis::default()
         .bounds([viewport.x_min, viewport.x_max])
         .style(Style::default().fg(Color::DarkGray));
-    let y_axis = Axis::default()
+    let mut y_axis = Axis::default()
         .bounds([0.0, 100.0])
         .style(Style::default().fg(Color::DarkGray));
+
+    if area.width >= 44 && area.height >= 10 {
+        let tick_style = Style::default().fg(Color::Gray);
+        let x_mid = (viewport.x_min + viewport.x_max) / 2.0;
+        let span_secs = (viewport.x_max - viewport.x_min).max(0.0);
+        let x_labels = [viewport.x_min, x_mid, viewport.x_max]
+            .into_iter()
+            .map(|ts| {
+                Span::styled(
+                    format_axis_ts_with_tz(ts, span_secs, area.width, state.clock, &Local),
+                    tick_style,
+                )
+            })
+            .collect::<Vec<_>>();
+        x_axis = x_axis.labels(x_labels).labels_alignment(Alignment::Right);
+        y_axis = y_axis
+            .labels(["0%", "50%", "100%"].map(|l| Span::styled(l, tick_style)))
+            .labels_alignment(Alignment::Right);
+    }
 
     let mut datasets = Vec::new();
     for seg in &boundary_segments {
@@ -637,11 +701,7 @@ fn draw_table(
             let age_str = format_time_ago_compact(p.last_sample, now);
 
             let group_label = rep.group_label(reports);
-            let group_cell = if idx < 9 {
-                format!("[{}] {}", idx + 1, group_label)
-            } else {
-                group_label
-            };
+            let group_cell = format!("[{}] {}", idx + 1, group_label);
 
             let mut row_cells = vec![
                 Cell::from(group_cell),
@@ -834,12 +894,6 @@ fn draw_status_bar(
 }
 
 fn draw_help_modal(frame: &mut Frame, area: Rect) {
-    let modal_w = 70.min(area.width);
-    let modal_h = 18.min(area.height);
-    let x = area.x + area.width.saturating_sub(modal_w) / 2;
-    let y = area.y + area.height.saturating_sub(modal_h) / 2;
-    let modal_area = Rect::new(x, y, modal_w, modal_h);
-
     let key_style = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
@@ -854,7 +908,11 @@ fn draw_help_modal(frame: &mut Frame, area: Rect) {
             Span::raw("Focus bucket chart & row"),
         ]),
         Line::from(vec![
-            Span::styled("  Esc        ", key_style),
+            Span::styled("  j/k, ↑/↓   ", key_style),
+            Span::raw("Focus next / prev bucket (Tab / BackTab)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc / 0    ", key_style),
             Span::raw("Close help or return to grid view"),
         ]),
         Line::from(vec![
@@ -862,8 +920,16 @@ fn draw_help_modal(frame: &mut Frame, area: Rect) {
             Span::raw("Cycle chart time range (Window/24h/7d/30d/All)"),
         ]),
         Line::from(vec![
+            Span::styled("  T / W      ", key_style),
+            Span::raw("Cycle chart time range backward"),
+        ]),
+        Line::from(vec![
             Span::styled("  r          ", key_style),
             Span::raw("Refresh usage samples in background"),
+        ]),
+        Line::from(vec![
+            Span::styled("  o          ", key_style),
+            Span::raw("Open HTML dashboard in browser"),
         ]),
         Line::from(vec![
             Span::styled("  ?          ", key_style),
@@ -908,6 +974,12 @@ fn draw_help_modal(frame: &mut Frame, area: Rect) {
             Span::raw("   Bucket inactive or weekly limit reached"),
         ]),
     ];
+
+    let modal_w = 70.min(area.width);
+    let modal_h = (lines.len() as u16 + 2).min(area.height);
+    let x = area.x + area.width.saturating_sub(modal_w) / 2;
+    let y = area.y + area.height.saturating_sub(modal_h) / 2;
+    let modal_area = Rect::new(x, y, modal_w, modal_h);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1104,22 +1176,57 @@ pub fn render_ansi(
     out
 }
 
-pub fn print_once(reports: &[BucketReport], now: DateTime<Utc>, clock: ClockFormat) -> Result<()> {
-    let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((120, 40));
-    let needed = if reports.is_empty() {
+/// Computes `(width, height)` for one-shot (`show --once`) rendering.
+///
+/// Interactive TTY output fits all chart rows without an artificial 36-row cap
+/// when the terminal is tall enough, while capping to `terminal_height - 2`
+/// (preserving room for the shell prompt) and exact terminal width when
+/// constrained. Non-TTY output defaults to 120 columns and expands beyond 40
+/// rows when needed for multi-bucket grids.
+pub fn once_dimensions(
+    report_count: usize,
+    terminal_size: Option<(u16, u16)>,
+    is_tty: bool,
+) -> (u16, u16) {
+    let (term_w, term_h) = terminal_size
+        .filter(|&(w, h)| w > 0 && h > 0)
+        .unwrap_or((120, 40));
+    let width = if is_tty { term_w } else { 120 };
+    let needed: u16 = if report_count == 0 {
         5
     } else {
         let cols = if width >= 100 { 2 } else { 1 };
-        let num_rows = reports.len().div_ceil(cols) as u16;
-        let table_h = reports.len() as u16 + 3;
-        (num_rows * 9) + table_h + 1
+        let num_rows = u16::try_from(report_count.div_ceil(cols)).unwrap_or(u16::MAX);
+        let table_h = u16::try_from(report_count)
+            .unwrap_or(u16::MAX)
+            .saturating_add(3);
+        num_rows
+            .saturating_mul(10)
+            .saturating_add(table_h)
+            .saturating_add(1)
     };
-    let h = needed.min(height.saturating_sub(2)).clamp(10, 36);
-
-    if std::io::stdout().is_terminal() {
-        print!("{}", render_ansi(reports, now, width.max(80), h, clock));
+    let height = if is_tty {
+        let max_h = term_h.saturating_sub(2).max(2.min(term_h));
+        needed.min(max_h)
     } else {
-        println!("{}", render_plain(reports, now, 120, 40, clock));
+        needed.max(40)
+    };
+    (width, height)
+}
+
+pub fn print_once(reports: &[BucketReport], now: DateTime<Utc>, clock: ClockFormat) -> Result<()> {
+    let is_tty = std::io::stdout().is_terminal();
+    let term_size = if is_tty {
+        ratatui::crossterm::terminal::size().ok()
+    } else {
+        None
+    };
+    let (w, h) = once_dimensions(reports.len(), term_size, is_tty);
+
+    if is_tty {
+        print!("{}", render_ansi(reports, now, w, h, clock));
+    } else {
+        println!("{}", render_plain(reports, now, w, h, clock));
     }
     Ok(())
 }
@@ -1248,6 +1355,7 @@ pub enum KeyAction {
     None,
     Quit,
     Refresh,
+    OpenDashboard,
 }
 
 pub fn handle_key_event(
@@ -1274,7 +1382,7 @@ pub fn handle_key_event(
             state.show_help = true;
             KeyAction::None
         }
-        KeyCode::Esc => {
+        KeyCode::Esc | KeyCode::Char('0') => {
             state.focus = None;
             KeyAction::None
         }
@@ -1282,7 +1390,30 @@ pub fn handle_key_event(
             state.time_range = state.time_range.next();
             KeyAction::None
         }
+        KeyCode::Char('T') | KeyCode::Char('W') => {
+            state.time_range = state.time_range.prev();
+            KeyAction::None
+        }
+        KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => {
+            if report_count > 0 {
+                state.focus = Some(match state.focus {
+                    Some(i) if i + 1 < report_count => i + 1,
+                    _ => 0,
+                });
+            }
+            KeyAction::None
+        }
+        KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => {
+            if report_count > 0 {
+                state.focus = Some(match state.focus {
+                    Some(i) if i > 0 && i < report_count => i - 1,
+                    _ => report_count - 1,
+                });
+            }
+            KeyAction::None
+        }
         KeyCode::Char('r') => KeyAction::Refresh,
+        KeyCode::Char('o') => KeyAction::OpenDashboard,
         KeyCode::Char(c) if ('1'..='9').contains(&c) => {
             let idx = (c as usize) - ('1' as usize);
             if idx < report_count {
@@ -1294,7 +1425,106 @@ pub fn handle_key_event(
     }
 }
 
+fn write_dashboard_html(
+    data_dir: &Path,
+    reports: &[BucketReport],
+    now: DateTime<Utc>,
+    history_days: u64,
+    clock: ClockFormat,
+) -> std::io::Result<PathBuf> {
+    let days = u32::try_from(history_days).unwrap_or(u32::MAX);
+    let rendered = crate::html::render(reports, now, days, clock);
+    let html_path = data_dir.join("dashboard.html");
+    crate::html::write_atomic(&html_path, &rendered)?;
+    Ok(html_path)
+}
+
+fn browser_open_command(os: &str, target: &Path) -> (&'static str, Vec<OsString>) {
+    let path_arg = target.as_os_str().to_os_string();
+    match os {
+        "macos" => ("open", vec![path_arg]),
+        "windows" => (
+            "cmd",
+            vec![
+                OsString::from("/C"),
+                OsString::from("start"),
+                OsString::from(""),
+                path_arg,
+            ],
+        ),
+        _ => ("xdg-open", vec![path_arg]),
+    }
+}
+
+fn spawn_browser_command(program: &str, args: &[OsString]) -> std::io::Result<()> {
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+fn spawn_browser(target: &Path) -> std::io::Result<()> {
+    let (program, args) = browser_open_command(std::env::consts::OS, target);
+    spawn_browser_command(program, &args)
+}
+
+fn open_dashboard_with<F>(
+    data_dir: &Path,
+    reports: &[BucketReport],
+    now: DateTime<Utc>,
+    history_days: u64,
+    clock: ClockFormat,
+    launcher: F,
+) -> String
+where
+    F: FnOnce(&Path) -> std::io::Result<()>,
+{
+    let html_path = match write_dashboard_html(data_dir, reports, now, history_days, clock) {
+        Ok(path) => path,
+        Err(e) => return format!("Failed to write dashboard HTML: {e}"),
+    };
+    let launch_target = std::path::absolute(&html_path).unwrap_or_else(|_| html_path.clone());
+    match launcher(&launch_target) {
+        Ok(()) => format!("Opened {}", html_path.display()),
+        Err(e) => format!(
+            "Wrote {}, but failed to open browser: {e}",
+            html_path.display()
+        ),
+    }
+}
+
+fn open_dashboard(
+    data_dir: &Path,
+    reports: &[BucketReport],
+    now: DateTime<Utc>,
+    history_days: u64,
+    clock: ClockFormat,
+) -> String {
+    open_dashboard_with(data_dir, reports, now, history_days, clock, spawn_browser)
+}
+
 pub fn run(data_dir: &Path, tight: f64, agy_bin: &str, clock: ClockFormat) -> Result<()> {
+    run_with_history(data_dir, tight, agy_bin, clock, 30)
+}
+
+pub fn run_with_history(
+    data_dir: &Path,
+    tight: f64,
+    agy_bin: &str,
+    clock: ClockFormat,
+    history_days: u64,
+) -> Result<()> {
     let mut terminal = ratatui::try_init()?;
     let result = (|| -> Result<()> {
         let samples_path = data_dir.join("samples.jsonl");
@@ -1344,6 +1574,19 @@ pub fn run(data_dir: &Path, tight: f64, agy_bin: &str, clock: ClockFormat) -> Re
                             &mut state,
                             &mut load_error,
                         );
+                        if load_error.is_none()
+                            && let Err(e) = write_dashboard_html(
+                                data_dir,
+                                &reports,
+                                Utc::now(),
+                                history_days,
+                                state.clock,
+                            )
+                        {
+                            state.message = Some(format!(
+                                "Refreshed, but failed to update dashboard.html: {e}"
+                            ));
+                        }
                         last_reload = Instant::now();
                     }
                     RefreshOutcome::Error(err) => {
@@ -1400,6 +1643,15 @@ pub fn run(data_dir: &Path, tight: f64, agy_bin: &str, clock: ClockFormat) -> Re
             {
                 match handle_key_event(&mut state, key.code, key.modifiers, reports.len()) {
                     KeyAction::Quit => break,
+                    KeyAction::OpenDashboard => {
+                        state.message = Some(open_dashboard(
+                            data_dir,
+                            &reports,
+                            Utc::now(),
+                            history_days,
+                            state.clock,
+                        ));
+                    }
                     KeyAction::Refresh => {
                         if is_refreshing {
                             state.message = Some("Refresh already in progress...".to_string());
@@ -2986,5 +3238,467 @@ mod tests {
         // Projection line starts from the latest actual sample (51.08%), matching raw remaining_now.
         let proj = projection_points(rep, reset);
         assert_eq!(proj.first().map(|&(_, y)| y), Some(0.5108 * 100.0));
+    }
+
+    #[test]
+    fn once_dimensions_handles_narrow_short_tall_empty_and_non_tty() {
+        // Tall narrow terminal (80x60) with 4 buckets uses 1 col (4 rows) and exceeds old 36-row cap
+        assert_eq!(once_dimensions(4, Some((80, 60)), true), (80, 48));
+
+        // Tall wide terminal (120x60) with 6 buckets (3 rows) is not truncated at 36
+        assert_eq!(once_dimensions(6, Some((120, 60)), true), (120, 40));
+
+        // Tall wide terminal (120x80) with 10 buckets (5 rows) gets full height
+        assert_eq!(once_dimensions(10, Some((120, 80)), true), (120, 64));
+
+        // Short terminal (120x24) gracefully caps to terminal_height - 2
+        assert_eq!(once_dimensions(6, Some((120, 24)), true), (120, 22));
+
+        // Very short terminal (80x10) caps to 8 instead of clamping up to 10
+        assert_eq!(once_dimensions(4, Some((80, 10)), true), (80, 8));
+
+        // Very narrow terminal (60x40) keeps terminal width 60 instead of overflowing at 80
+        assert_eq!(once_dimensions(4, Some((60, 40)), true), (60, 38));
+
+        // Tiny 2-row terminal stays positive and within bounds
+        assert_eq!(once_dimensions(4, Some((40, 2)), true), (40, 2));
+
+        // Empty reports in TTY needs only 5 rows, not clamped up to 10
+        assert_eq!(once_dimensions(0, Some((120, 40)), true), (120, 5));
+
+        // Missing or zero terminal size falls back to (120, 40) bounds
+        assert_eq!(once_dimensions(4, None, true), (120, 28));
+        assert_eq!(once_dimensions(4, Some((0, 0)), true), (120, 28));
+
+        // Non-TTY defaults stay compatible with 120x40 for <=4 buckets and expand for many buckets
+        assert_eq!(once_dimensions(0, None, false), (120, 40));
+        assert_eq!(once_dimensions(4, Some((80, 24)), false), (120, 40));
+        assert_eq!(once_dimensions(8, None, false), (120, 52));
+    }
+
+    #[test]
+    fn chart_axis_ticks_dimension_gated_and_clock_formatted() {
+        use chrono::FixedOffset;
+
+        let reports = make_test_reports();
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
+        let short_rep = &reports[1]; // 5h bucket (81% left, span <= 24h)
+        let weekly_rep = &reports[0]; // weekly bucket (77% left, span > 24h)
+
+        let render_chart_rows =
+            |rep: &BucketReport, w: u16, h: u16, clock: ClockFormat| -> String {
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                let state = ViewState {
+                    clock,
+                    ..Default::default()
+                };
+                terminal
+                    .draw(|f| draw_chart(f, rep, &reports, f.area(), Some(0), &state, now))
+                    .unwrap();
+                let buf = terminal.backend().buffer();
+                let mut body = String::new();
+                for y in 1..h.saturating_sub(1) {
+                    for x in 0..w {
+                        body.push_str(buf[(x, y)].symbol());
+                    }
+                    body.push('\n');
+                }
+                body
+            };
+
+        // 1. At exact threshold (44x10): Y-axis (0%, 50%, 100%) and X-axis ticks render for H24 and H12
+        for (rep, label_kind) in [(short_rep, "5h"), (weekly_rep, "weekly")] {
+            let vp = chart_viewport(rep, TimeRange::Window).unwrap();
+            let x_mid = (vp.x_min + vp.x_max) / 2.0;
+            let span = (vp.x_max - vp.x_min).max(0.0);
+
+            for clock in [ClockFormat::H24, ClockFormat::H12] {
+                let body = render_chart_rows(rep, 44, 10, clock);
+                assert!(
+                    body.contains("0%") && body.contains("50%") && body.contains("100%"),
+                    "expected Y ticks at 44x10 ({label_kind}, {clock:?}):\n{body}"
+                );
+                for ts in [vp.x_min, x_mid, vp.x_max] {
+                    let expected = format_axis_ts_with_tz(ts, span, 44, clock, &Local);
+                    assert!(
+                        body.contains(&expected),
+                        "expected X tick '{expected}' at 44x10 ({label_kind}, {clock:?}):\n{body}"
+                    );
+                }
+                if clock == ClockFormat::H12 {
+                    assert!(
+                        body.contains("AM") || body.contains("PM"),
+                        "expected AM/PM in H12 X ticks at 44x10 ({label_kind}):\n{body}"
+                    );
+                } else {
+                    assert!(
+                        !body.contains("AM") && !body.contains("PM"),
+                        "unexpected AM/PM in H24 X ticks at 44x10 ({label_kind}):\n{body}"
+                    );
+                }
+            }
+        }
+
+        // 2. Negative boundary: width < 44 (43x10) and height < 10 (44x9) suppress all axis tick labels
+        for (w, h) in [(43, 10), (44, 9), (60, 9)] {
+            for clock in [ClockFormat::H24, ClockFormat::H12] {
+                let body = render_chart_rows(short_rep, w, h, clock);
+                assert!(
+                    !body.contains("0%") && !body.contains("50%") && !body.contains("100%"),
+                    "axis Y ticks must be suppressed at {w}x{h} ({clock:?}):\n{body}"
+                );
+                let vp = chart_viewport(short_rep, TimeRange::Window).unwrap();
+                let start_lbl =
+                    format_axis_ts_with_tz(vp.x_min, vp.x_max - vp.x_min, w, clock, &Local);
+                assert!(
+                    !body.contains(&start_lbl),
+                    "axis X tick '{start_lbl}' must be suppressed at {w}x{h} ({clock:?}):\n{body}"
+                );
+            }
+        }
+
+        // 3. Deterministic FixedOffset formatting verification for <=24h, >24h wide, >24h compact, and non-finite
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let ts = Utc
+            .with_ymd_and_hms(2026, 10, 11, 19, 18, 0)
+            .unwrap()
+            .timestamp() as f64;
+        assert_eq!(
+            format_axis_ts_with_tz(ts, 5.0 * 3600.0, 44, ClockFormat::H24, &tz),
+            "19:18"
+        );
+        assert_eq!(
+            format_axis_ts_with_tz(ts, 5.0 * 3600.0, 44, ClockFormat::H12, &tz),
+            "07:18 PM"
+        );
+        assert_eq!(
+            format_axis_ts_with_tz(ts, 7.0 * 86400.0, 60, ClockFormat::H24, &tz),
+            "10-11 19:18"
+        );
+        assert_eq!(
+            format_axis_ts_with_tz(ts, 7.0 * 86400.0, 60, ClockFormat::H12, &tz),
+            "10-11 07:18 PM"
+        );
+        assert_eq!(
+            format_axis_ts_with_tz(ts, 7.0 * 86400.0, 44, ClockFormat::H12, &tz),
+            "10-11 07PM"
+        );
+        assert_eq!(
+            format_axis_ts_with_tz(f64::NAN, 3600.0, 60, ClockFormat::H24, &tz),
+            ""
+        );
+
+        // 4. 2x2 grid at 122x27 (screenshot size) keeps bottom 9-row charts tick-free and clean
+        let text_122 = render_plain(&reports, now, 122, 27, ClockFormat::H24);
+        assert!(text_122.contains("[1] Gemini Models · Weekly"));
+        assert!(text_122.contains("[3] Claude and GPT models · Weekly"));
+    }
+
+    #[test]
+    fn time_range_prev_cycles_backward_and_inverts_next() {
+        let all = [
+            TimeRange::Window,
+            TimeRange::H24,
+            TimeRange::D7,
+            TimeRange::D30,
+            TimeRange::All,
+        ];
+        for r in all {
+            assert_eq!(r.next().prev(), r);
+            assert_eq!(r.prev().next(), r);
+        }
+        assert_eq!(TimeRange::Window.prev(), TimeRange::All);
+        assert_eq!(TimeRange::All.prev(), TimeRange::D30);
+        assert_eq!(TimeRange::D30.prev(), TimeRange::D7);
+        assert_eq!(TimeRange::D7.prev(), TimeRange::H24);
+        assert_eq!(TimeRange::H24.prev(), TimeRange::Window);
+    }
+
+    #[test]
+    fn handle_key_event_navigation_range_backward_and_open_dashboard() {
+        let mut state = ViewState::default();
+
+        // 'T' and 'W' cycle time range backward
+        assert_eq!(
+            handle_key_event(&mut state, KeyCode::Char('T'), KeyModifiers::SHIFT, 4),
+            KeyAction::None
+        );
+        assert_eq!(state.time_range, TimeRange::All);
+        assert_eq!(
+            handle_key_event(&mut state, KeyCode::Char('W'), KeyModifiers::NONE, 4),
+            KeyAction::None
+        );
+        assert_eq!(state.time_range, TimeRange::D30);
+
+        // Forward focus navigation: j / Down / Tab
+        for key in [KeyCode::Char('j'), KeyCode::Down, KeyCode::Tab] {
+            state.focus = None;
+            assert_eq!(
+                handle_key_event(&mut state, key, KeyModifiers::NONE, 3),
+                KeyAction::None
+            );
+            assert_eq!(state.focus, Some(0));
+            handle_key_event(&mut state, key, KeyModifiers::NONE, 3);
+            assert_eq!(state.focus, Some(1));
+            handle_key_event(&mut state, key, KeyModifiers::NONE, 3);
+            assert_eq!(state.focus, Some(2));
+            handle_key_event(&mut state, key, KeyModifiers::NONE, 3);
+            assert_eq!(state.focus, Some(0));
+        }
+
+        // Backward focus navigation: k / Up / BackTab
+        for key in [KeyCode::Char('k'), KeyCode::Up, KeyCode::BackTab] {
+            state.focus = None;
+            assert_eq!(
+                handle_key_event(&mut state, key, KeyModifiers::NONE, 3),
+                KeyAction::None
+            );
+            assert_eq!(state.focus, Some(2));
+            handle_key_event(&mut state, key, KeyModifiers::NONE, 3);
+            assert_eq!(state.focus, Some(1));
+            handle_key_event(&mut state, key, KeyModifiers::NONE, 3);
+            assert_eq!(state.focus, Some(0));
+            handle_key_event(&mut state, key, KeyModifiers::NONE, 3);
+            assert_eq!(state.focus, Some(2));
+        }
+
+        // '0' clears focus to grid view, same as Esc
+        state.focus = Some(1);
+        assert_eq!(
+            handle_key_event(&mut state, KeyCode::Char('0'), KeyModifiers::NONE, 3),
+            KeyAction::None
+        );
+        assert_eq!(state.focus, None);
+
+        // Safe when report_count == 0
+        for key in [
+            KeyCode::Char('j'),
+            KeyCode::Down,
+            KeyCode::Tab,
+            KeyCode::Char('k'),
+            KeyCode::Up,
+            KeyCode::BackTab,
+        ] {
+            assert_eq!(
+                handle_key_event(&mut state, key, KeyModifiers::NONE, 0),
+                KeyAction::None
+            );
+            assert_eq!(state.focus, None);
+        }
+
+        // 'o' triggers OpenDashboard
+        assert_eq!(
+            handle_key_event(&mut state, KeyCode::Char('o'), KeyModifiers::NONE, 3),
+            KeyAction::OpenDashboard
+        );
+
+        // Negative boundary: while help is open, new keys do not fire or mutate state
+        state.show_help = true;
+        state.focus = Some(1);
+        let saved_range = state.time_range;
+        for key in [
+            KeyCode::Char('T'),
+            KeyCode::Char('W'),
+            KeyCode::Char('j'),
+            KeyCode::Down,
+            KeyCode::Tab,
+            KeyCode::Char('k'),
+            KeyCode::Up,
+            KeyCode::BackTab,
+            KeyCode::Char('0'),
+            KeyCode::Char('o'),
+        ] {
+            assert_eq!(
+                handle_key_event(&mut state, key, KeyModifiers::NONE, 3),
+                KeyAction::None
+            );
+            assert_eq!(state.focus, Some(1));
+            assert_eq!(state.time_range, saved_range);
+        }
+    }
+
+    #[test]
+    fn table_index_badges_keep_brackets_at_ten_and_above() {
+        let base = make_test_reports();
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
+        let mut reports = Vec::new();
+        for i in 0..12 {
+            let mut rep = base[0].clone();
+            rep.group = format!("Bucket {:02}", i + 1);
+            rep.bucket_id = format!("bucket-{:02}", i + 1);
+            reports.push(rep);
+        }
+
+        let mut term = Terminal::new(TestBackend::new(120, 20)).unwrap();
+        term.draw(|f| draw_table(f, &reports, f.area(), now, None, ClockFormat::H24))
+            .unwrap();
+        let buf = term.backend().buffer();
+        let mut grid_text = String::new();
+        for y in 0..20 {
+            for x in 0..120 {
+                grid_text.push_str(buf[(x, y)].symbol());
+            }
+            grid_text.push('\n');
+        }
+        for idx in [1, 9, 10, 11, 12] {
+            let expected = format!("[{idx}] Bucket {idx:02}");
+            assert!(
+                grid_text.contains(&expected),
+                "missing bracketed badge '{expected}' in table:\n{grid_text}"
+            );
+        }
+
+        // Focused view at index 9 ([10]) and index 11 ([12]) also retains brackets
+        for (focus_idx, badge) in [(9, "[10] Bucket 10"), (11, "[12] Bucket 12")] {
+            let mut focus_term = Terminal::new(TestBackend::new(120, 6)).unwrap();
+            focus_term
+                .draw(|f| {
+                    draw_table(
+                        f,
+                        &reports,
+                        f.area(),
+                        now,
+                        Some(focus_idx),
+                        ClockFormat::H24,
+                    )
+                })
+                .unwrap();
+            let fbuf = focus_term.backend().buffer();
+            let mut focus_text = String::new();
+            for y in 0..6 {
+                for x in 0..120 {
+                    focus_text.push_str(fbuf[(x, y)].symbol());
+                }
+                focus_text.push('\n');
+            }
+            assert!(
+                focus_text.contains(badge),
+                "missing bracketed badge '{badge}' in focused table:\n{focus_text}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_modal_documents_new_controls_and_scales_height_dynamically() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw_help_modal(f, f.area())).unwrap();
+        let buf = terminal.backend().buffer();
+        let mut lines = Vec::new();
+        for y in 0..40 {
+            let mut row = String::new();
+            for x in 0..120 {
+                row.push_str(buf[(x, y)].symbol());
+            }
+            lines.push(row);
+        }
+        let text = lines.join("\n");
+
+        for expected in [
+            "j/k, ↑/↓",
+            "Tab / BackTab",
+            "Esc / 0",
+            "T / W",
+            "o          Open HTML dashboard in browser",
+            "Cycle chart time range (Window/24h/7d/30d/All)",
+            "Bucket inactive or weekly limit reached",
+        ] {
+            assert!(
+                text.contains(expected),
+                "missing '{expected}' in help modal:\n{text}"
+            );
+        }
+
+        // Modal height is dynamically computed (> old hardcoded 18) and centered
+        let modal_rows = lines
+            .iter()
+            .filter(|l| l.contains('┌') || l.contains('│') || l.contains('└'))
+            .count();
+        assert!(
+            modal_rows > 18 && modal_rows < 40,
+            "expected dynamic modal height > 18, got {modal_rows}:\n{text}"
+        );
+
+        // Constrained terminal caps modal cleanly to area.height without panic
+        let mut short_term = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        short_term.draw(|f| draw_help_modal(f, f.area())).unwrap();
+        let short_buf = short_term.backend().buffer();
+        let top_row: String = (0..80).map(|x| short_buf[(x, 0)].symbol()).collect();
+        let bot_row: String = (0..80).map(|x| short_buf[(x, 11)].symbol()).collect();
+        assert!(top_row.contains('┌') && bot_row.contains('└'));
+    }
+
+    #[test]
+    fn open_dashboard_and_browser_command_helpers() {
+        let p = Path::new("/tmp/agy-usage/dashboard.html");
+        let (prog, args) = browser_open_command("linux", p);
+        assert_eq!(prog, "xdg-open");
+        assert_eq!(args, vec![OsString::from(p)]);
+
+        let (prog, args) = browser_open_command("macos", p);
+        assert_eq!(prog, "open");
+        assert_eq!(args, vec![OsString::from(p)]);
+
+        let (prog, args) = browser_open_command("windows", p);
+        assert_eq!(prog, "cmd");
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("/C"),
+                OsString::from("start"),
+                OsString::from(""),
+                OsString::from(p),
+            ]
+        );
+
+        let (prog, args) = browser_open_command("freebsd", p);
+        assert_eq!(prog, "xdg-open");
+        assert_eq!(args, vec![OsString::from(p)]);
+
+        // Happy path: writes HTML with clock & history_days and passes absolute path to launcher
+        let dir = tempfile::tempdir().unwrap();
+        let reports = make_test_reports();
+        let now = Utc.with_ymd_and_hms(2026, 10, 11, 17, 5, 0).unwrap();
+        let mut launched_path = None;
+        let msg = open_dashboard_with(dir.path(), &reports, now, 7, ClockFormat::H12, |target| {
+            launched_path = Some(target.to_path_buf());
+            Ok(())
+        });
+        assert!(msg.starts_with("Opened "), "unexpected msg: {msg}");
+        let html_file = dir.path().join("dashboard.html");
+        assert!(html_file.exists());
+        let html = std::fs::read_to_string(&html_file).unwrap();
+        assert!(html.contains("\"clock\":\"12h\""));
+        assert!(launched_path.unwrap().is_absolute());
+
+        // Launcher failure surfaces gracefully in status message without panic
+        let err_msg = open_dashboard_with(dir.path(), &reports, now, 30, ClockFormat::H24, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "missing opener",
+            ))
+        });
+        assert!(err_msg.contains("failed to open browser"), "{err_msg}");
+        assert!(err_msg.contains("missing opener"), "{err_msg}");
+
+        // Write failure (data_dir is an existing regular file) returns error without invoking launcher
+        let bad_dir = dir.path().join("not_a_dir");
+        std::fs::write(&bad_dir, "file").unwrap();
+        let mut called = false;
+        let write_err = open_dashboard_with(&bad_dir, &reports, now, 30, ClockFormat::H24, |_| {
+            called = true;
+            Ok(())
+        });
+        assert!(!called);
+        assert!(
+            write_err.starts_with("Failed to write dashboard HTML:"),
+            "{write_err}"
+        );
+
+        // Missing browser binary fails cleanly
+        let spawn_err = spawn_browser_command(
+            "definitely-nonexistent-browser-binary-for-agy-test",
+            &[OsString::from(html_file.as_os_str())],
+        );
+        assert!(spawn_err.is_err());
     }
 }

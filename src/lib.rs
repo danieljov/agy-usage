@@ -1,8 +1,10 @@
 pub mod clock;
+pub mod doctor;
 pub mod forecast;
 pub mod html;
 pub mod model;
 pub mod source;
+pub mod status;
 pub mod store;
 pub mod timer;
 pub mod tui;
